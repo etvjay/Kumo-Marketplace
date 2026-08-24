@@ -12,6 +12,7 @@
   "dependencies": {
     "@kumo/financial-agent-kernel": "workspace:*",
     "@kumo/shared": "workspace:*",
+    "viem": "^2.37.5",
     "zod": "^3.24.2"
   },
   "devDependencies": {
