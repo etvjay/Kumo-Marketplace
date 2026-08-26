@@ -40,6 +40,20 @@ const POSITION_MANAGER_ABI = [
     stateMutability: "view",
     inputs: [{ name: "tokenId", type: "uint256" }],
     outputs: [{ name: "owner", type: "address" }]
+  },
+  {
+    type: "function",
+    name: "totalSupply",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "totalSupply", type: "uint256" }]
+  },
+  {
+    type: "function",
+    name: "tokenByIndex",
+    stateMutability: "view",
+    inputs: [{ name: "index", type: "uint256" }],
+    outputs: [{ name: "tokenId", type: "uint256" }]
   }
 ] as const;
 
@@ -103,6 +117,22 @@ export interface PancakeV3ContractEvidence {
   address: Address;
   bytecodePresent: boolean;
   bytecodePrefix?: Hex;
+}
+
+export interface PancakeV3PositionDiscoveryEntry {
+  tokenId: string;
+  owner: Address;
+  token0: Address;
+  token1: Address;
+  fee: number;
+  liquidity: bigint;
+}
+
+export interface PancakeV3PositionDiscovery {
+  snapshot: ChainSnapshot;
+  totalSupply: string;
+  scanned: number;
+  positions: PancakeV3PositionDiscoveryEntry[];
 }
 
 export interface PancakeV3RawPositionSnapshot {
@@ -206,6 +236,71 @@ export class PancakeV3BscReader {
         v3UniversalRouter: this.codeEvidence(this.v3UniversalRouter, universalRouterCode),
         permit2: this.codeEvidence(this.permit2, permit2Code)
       }
+    };
+  }
+
+  /**
+   * Enumerates the newest currently existing ERC-721 positions at one frozen
+   * block. This is discovery only; a selected NFT must still be re-read through
+   * readPosition before it becomes economic evidence.
+   */
+  async discoverRecentPositions(maxCandidates = 32): Promise<PancakeV3PositionDiscovery> {
+    if (!Number.isInteger(maxCandidates) || maxCandidates <= 0 || maxCandidates > 256) {
+      throw new Error("PANCAKE_DISCOVERY_LIMIT_INVALID");
+    }
+
+    const frozen = await this.freezeBlock();
+    const totalSupply = await this.client.readContract({
+      address: this.positionManager,
+      abi: POSITION_MANAGER_ABI,
+      functionName: "totalSupply",
+      blockNumber: frozen.blockNumber
+    });
+
+    const count = Number(totalSupply < BigInt(maxCandidates) ? totalSupply : BigInt(maxCandidates));
+    const start = totalSupply - BigInt(count);
+    const indices = Array.from({ length: count }, (_, offset) => start + BigInt(offset));
+    const tokenIds = await Promise.all(indices.map((index) => this.client.readContract({
+      address: this.positionManager,
+      abi: POSITION_MANAGER_ABI,
+      functionName: "tokenByIndex",
+      args: [index],
+      blockNumber: frozen.blockNumber
+    })));
+
+    const positions = await Promise.all(tokenIds.reverse().map(async (tokenId) => {
+      const [position, owner] = await Promise.all([
+        this.client.readContract({
+          address: this.positionManager,
+          abi: POSITION_MANAGER_ABI,
+          functionName: "positions",
+          args: [tokenId],
+          blockNumber: frozen.blockNumber
+        }),
+        this.client.readContract({
+          address: this.positionManager,
+          abi: POSITION_MANAGER_ABI,
+          functionName: "ownerOf",
+          args: [tokenId],
+          blockNumber: frozen.blockNumber
+        })
+      ]);
+
+      return {
+        tokenId: tokenId.toString(),
+        owner: getAddress(owner),
+        token0: getAddress(position[2]),
+        token1: getAddress(position[3]),
+        fee: position[4],
+        liquidity: position[7]
+      } satisfies PancakeV3PositionDiscoveryEntry;
+    }));
+
+    return {
+      snapshot: frozen.snapshot,
+      totalSupply: totalSupply.toString(),
+      scanned: positions.length,
+      positions
     };
   }
 
