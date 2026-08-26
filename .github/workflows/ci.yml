@@ -24,8 +24,8 @@ jobs:
       - name: Install dependencies
         run: pnpm install --no-frozen-lockfile
 
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Build
+      - name: Build workspace
         run: pnpm build
+
+      - name: Typecheck workspace
+        run: pnpm typecheck
