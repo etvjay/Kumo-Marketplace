@@ -82,6 +82,16 @@ const POOL_ABI = [
   }
 ] as const;
 
+const ERC20_METADATA_ABI = [
+  {
+    type: "function",
+    name: "decimals",
+    stateMutability: "view",
+    inputs: [],
+    outputs: [{ name: "decimals", type: "uint8" }]
+  }
+] as const;
+
 const BSC = {
   id: 56,
   name: "BNB Smart Chain",
@@ -102,10 +112,14 @@ export interface PancakeV3RawPositionSnapshot {
   operator: Address;
   token0: Address;
   token1: Address;
+  token0Decimals: number;
+  token1Decimals: number;
   fee: number;
   tickLower: number;
   tickUpper: number;
   positionLiquidity: bigint;
+  feeGrowthInside0LastX128: bigint;
+  feeGrowthInside1LastX128: bigint;
   tokensOwed0: bigint;
   tokensOwed1: bigint;
   pool: Address;
@@ -218,7 +232,7 @@ export class PancakeV3BscReader {
 
     const [
       , operator, token0, token1, fee, tickLower, tickUpper, positionLiquidity,
-      , , tokensOwed0, tokensOwed1
+      feeGrowthInside0LastX128, feeGrowthInside1LastX128, tokensOwed0, tokensOwed1
     ] = position;
 
     const pool = await this.client.readContract({
@@ -233,7 +247,7 @@ export class PancakeV3BscReader {
       throw new Error("PANCAKESWAP_POOL_NOT_FOUND");
     }
 
-    const [slot0, poolLiquidity, poolCode] = await Promise.all([
+    const [slot0, poolLiquidity, poolCode, token0Decimals, token1Decimals] = await Promise.all([
       this.client.readContract({
         address: pool,
         abi: POOL_ABI,
@@ -246,7 +260,19 @@ export class PancakeV3BscReader {
         functionName: "liquidity",
         blockNumber: frozen.blockNumber
       }),
-      this.client.getBytecode({ address: pool, blockNumber: frozen.blockNumber })
+      this.client.getBytecode({ address: pool, blockNumber: frozen.blockNumber }),
+      this.client.readContract({
+        address: token0,
+        abi: ERC20_METADATA_ABI,
+        functionName: "decimals",
+        blockNumber: frozen.blockNumber
+      }),
+      this.client.readContract({
+        address: token1,
+        abi: ERC20_METADATA_ABI,
+        functionName: "decimals",
+        blockNumber: frozen.blockNumber
+      })
     ]);
 
     if (!poolCode || poolCode === "0x") throw new Error("PANCAKESWAP_POOL_CODE_MISSING");
@@ -260,10 +286,14 @@ export class PancakeV3BscReader {
       operator: getAddress(operator),
       token0: getAddress(token0),
       token1: getAddress(token1),
+      token0Decimals,
+      token1Decimals,
       fee,
       tickLower,
       tickUpper,
       positionLiquidity,
+      feeGrowthInside0LastX128,
+      feeGrowthInside1LastX128,
       tokensOwed0,
       tokensOwed1,
       pool: getAddress(pool),
