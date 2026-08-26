@@ -1,0 +1,51 @@
+name: Rebalancer Live Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/**"
+      - "packages/chain-state/**"
+      - "scripts/rebalancer-live-probe.mjs"
+      - ".github/workflows/rebalancer-live-probe.yml"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Probe finalized BSC state
+        env:
+          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          KUMO_PANCAKE_SCAN_LIMIT: "48"
+          KUMO_EVIDENCE_PATH: evidence/live/rebalancer-live-probe.json
+        run: node scripts/rebalancer-live-probe.mjs
+
+      - name: Upload live evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebalancer-live-probe-${{ github.sha }}
+          path: evidence/live/rebalancer-live-probe.json
+          if-no-files-found: error
+          retention-days: 30
