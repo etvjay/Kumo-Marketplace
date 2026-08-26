@@ -1,5 +1,5 @@
 {
-  "name": "@kumo/reference-agents",
+  "name": "@kumo/chain-state",
   "version": "0.1.0",
   "private": true,
   "type": "module",
@@ -8,14 +8,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit"
-  },
-  "dependencies": {
-    "@kumo/chain-state": "workspace:*",
-    "@kumo/financial-agent-kernel": "workspace:*",
-    "@kumo/noema-agent-profile": "workspace:*",
-    "@kumo/shared": "workspace:*",
-    "viem": "^2.37.5",
-    "zod": "^3.24.2"
   },
   "devDependencies": {
     "typescript": "^5.8.2"

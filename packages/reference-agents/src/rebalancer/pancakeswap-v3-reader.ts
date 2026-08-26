@@ -5,6 +5,12 @@ import {
   type Address,
   type Hex
 } from "viem";
+import {
+  defaultBscStateReadPolicy,
+  type ChainSnapshot,
+  type EvmBlockTag,
+  type ObservationPurpose
+} from "@kumo/chain-state";
 import { PANCAKESWAP_V3_BSC } from "./pancakeswap-v3.js";
 
 const POSITION_MANAGER_ABI = [
@@ -108,14 +114,24 @@ export interface PancakeV3RawPositionSnapshot {
   poolLiquidity: bigint;
   unlocked: boolean;
   blockNumber: bigint;
+  blockHash: Hex;
+  blockTimestamp: number;
+  blockTag: EvmBlockTag;
+  purpose: ObservationPurpose;
+  snapshot: ChainSnapshot;
   observedAt: string;
 }
 
 export interface PancakeV3ReaderOptions {
   rpcUrl: string;
+  rpcProviderId?: string;
+  purpose?: ObservationPurpose;
+  blockTag?: EvmBlockTag;
   factory?: Address;
   nonfungiblePositionManager?: Address;
-  smartRouter?: Address;
+  legacySmartRouter?: Address;
+  v3UniversalRouter?: Address;
+  permit2?: Address;
   clock?: () => string;
 }
 
@@ -124,7 +140,12 @@ export class PancakeV3BscReader {
   private readonly client;
   private readonly factory: Address;
   private readonly positionManager: Address;
-  private readonly smartRouter: Address;
+  private readonly legacySmartRouter: Address;
+  private readonly v3UniversalRouter: Address;
+  private readonly permit2: Address;
+  private readonly purpose: ObservationPurpose;
+  private readonly blockTag: EvmBlockTag;
+  private readonly rpcProviderId: string;
   private readonly clock: () => string;
 
   constructor(options: PancakeV3ReaderOptions) {
@@ -133,83 +154,79 @@ export class PancakeV3BscReader {
     this.positionManager = getAddress(
       options.nonfungiblePositionManager ?? PANCAKESWAP_V3_BSC.nonfungiblePositionManager
     );
-    this.smartRouter = getAddress(options.smartRouter ?? PANCAKESWAP_V3_BSC.smartRouter);
+    this.legacySmartRouter = getAddress(options.legacySmartRouter ?? PANCAKESWAP_V3_BSC.legacySmartRouter);
+    this.v3UniversalRouter = getAddress(options.v3UniversalRouter ?? PANCAKESWAP_V3_BSC.v3UniversalRouter);
+    this.permit2 = getAddress(options.permit2 ?? PANCAKESWAP_V3_BSC.permit2);
+    this.purpose = options.purpose ?? "evidence";
+    this.blockTag = options.blockTag ?? defaultBscStateReadPolicy(this.purpose).blockTag;
+    this.rpcProviderId = options.rpcProviderId ?? "bsc-rpc";
     this.clock = options.clock ?? (() => new Date().toISOString());
-    this.client = createPublicClient({
-      chain: BSC,
-      transport: http(options.rpcUrl)
-    });
+    this.client = createPublicClient({ chain: BSC, transport: http(options.rpcUrl) });
   }
 
   async verifyConfiguredContracts(): Promise<{
-    chainId: number;
-    checkedAt: string;
+    snapshot: ChainSnapshot;
     contracts: {
       factory: PancakeV3ContractEvidence;
       nonfungiblePositionManager: PancakeV3ContractEvidence;
-      smartRouter: PancakeV3ContractEvidence;
+      legacySmartRouter: PancakeV3ContractEvidence;
+      v3UniversalRouter: PancakeV3ContractEvidence;
+      permit2: PancakeV3ContractEvidence;
     };
   }> {
-    const [chainId, factoryCode, managerCode, routerCode] = await Promise.all([
-      this.client.getChainId(),
-      this.client.getBytecode({ address: this.factory }),
-      this.client.getBytecode({ address: this.positionManager }),
-      this.client.getBytecode({ address: this.smartRouter })
+    const frozen = await this.freezeBlock();
+    const [factoryCode, managerCode, legacyRouterCode, universalRouterCode, permit2Code] = await Promise.all([
+      this.client.getBytecode({ address: this.factory, blockNumber: frozen.blockNumber }),
+      this.client.getBytecode({ address: this.positionManager, blockNumber: frozen.blockNumber }),
+      this.client.getBytecode({ address: this.legacySmartRouter, blockNumber: frozen.blockNumber }),
+      this.client.getBytecode({ address: this.v3UniversalRouter, blockNumber: frozen.blockNumber }),
+      this.client.getBytecode({ address: this.permit2, blockNumber: frozen.blockNumber })
     ]);
 
-    if (chainId !== PANCAKESWAP_V3_BSC.chainId) {
-      throw new Error(`WRONG_CHAIN:${chainId}`);
-    }
-
     return {
-      chainId,
-      checkedAt: this.clock(),
+      snapshot: frozen.snapshot,
       contracts: {
         factory: this.codeEvidence(this.factory, factoryCode),
         nonfungiblePositionManager: this.codeEvidence(this.positionManager, managerCode),
-        smartRouter: this.codeEvidence(this.smartRouter, routerCode)
+        legacySmartRouter: this.codeEvidence(this.legacySmartRouter, legacyRouterCode),
+        v3UniversalRouter: this.codeEvidence(this.v3UniversalRouter, universalRouterCode),
+        permit2: this.codeEvidence(this.permit2, permit2Code)
       }
     };
   }
 
   async readPosition(tokenIdInput: string | bigint): Promise<PancakeV3RawPositionSnapshot> {
     const tokenId = BigInt(tokenIdInput);
-    const [position, owner, blockNumber] = await Promise.all([
+    const frozen = await this.freezeBlock();
+
+    const [position, owner] = await Promise.all([
       this.client.readContract({
         address: this.positionManager,
         abi: POSITION_MANAGER_ABI,
         functionName: "positions",
-        args: [tokenId]
+        args: [tokenId],
+        blockNumber: frozen.blockNumber
       }),
       this.client.readContract({
         address: this.positionManager,
         abi: POSITION_MANAGER_ABI,
         functionName: "ownerOf",
-        args: [tokenId]
-      }),
-      this.client.getBlockNumber()
+        args: [tokenId],
+        blockNumber: frozen.blockNumber
+      })
     ]);
 
     const [
-      ,
-      operator,
-      token0,
-      token1,
-      fee,
-      tickLower,
-      tickUpper,
-      positionLiquidity,
-      ,
-      ,
-      tokensOwed0,
-      tokensOwed1
+      , operator, token0, token1, fee, tickLower, tickUpper, positionLiquidity,
+      , , tokensOwed0, tokensOwed1
     ] = position;
 
     const pool = await this.client.readContract({
       address: this.factory,
       abi: FACTORY_ABI,
       functionName: "getPool",
-      args: [token0, token1, fee]
+      args: [token0, token1, fee],
+      blockNumber: frozen.blockNumber
     });
 
     if (pool === "0x0000000000000000000000000000000000000000") {
@@ -220,14 +237,16 @@ export class PancakeV3BscReader {
       this.client.readContract({
         address: pool,
         abi: POOL_ABI,
-        functionName: "slot0"
+        functionName: "slot0",
+        blockNumber: frozen.blockNumber
       }),
       this.client.readContract({
         address: pool,
         abi: POOL_ABI,
-        functionName: "liquidity"
+        functionName: "liquidity",
+        blockNumber: frozen.blockNumber
       }),
-      this.client.getBytecode({ address: pool })
+      this.client.getBytecode({ address: pool, blockNumber: frozen.blockNumber })
     ]);
 
     if (!poolCode || poolCode === "0x") throw new Error("PANCAKESWAP_POOL_CODE_MISSING");
@@ -252,8 +271,41 @@ export class PancakeV3BscReader {
       currentTick,
       poolLiquidity,
       unlocked,
-      blockNumber,
-      observedAt: this.clock()
+      blockNumber: frozen.blockNumber,
+      blockHash: frozen.blockHash,
+      blockTimestamp: frozen.snapshot.blockTimestamp,
+      blockTag: frozen.snapshot.blockTag,
+      purpose: frozen.snapshot.purpose,
+      snapshot: frozen.snapshot,
+      observedAt: frozen.snapshot.observedAt
+    };
+  }
+
+  private async freezeBlock(): Promise<{
+    blockNumber: bigint;
+    blockHash: Hex;
+    snapshot: ChainSnapshot;
+  }> {
+    const chainId = await this.client.getChainId();
+    if (chainId !== PANCAKESWAP_V3_BSC.chainId) throw new Error(`WRONG_CHAIN:${chainId}`);
+
+    const block = await this.client.getBlock({ blockTag: this.blockTag });
+    if (block.number === null || block.hash === null) throw new Error("BSC_BLOCK_IDENTITY_UNAVAILABLE");
+
+    const observedAt = this.clock();
+    return {
+      blockNumber: block.number,
+      blockHash: block.hash,
+      snapshot: {
+        chainId,
+        purpose: this.purpose,
+        blockTag: this.blockTag,
+        blockNumber: block.number.toString(),
+        blockHash: block.hash,
+        blockTimestamp: Number(block.timestamp),
+        observedAt,
+        rpcProviderId: this.rpcProviderId
+      }
     };
   }
 
