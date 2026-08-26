@@ -4,6 +4,8 @@ export * from "./economics.js";
 export * from "./v3-math.js";
 export * from "./valuation.js";
 export * from "./baseline.js";
+export * from "./chainlink-price-provider.js";
+export * from "./live-preparation.js";
 export * from "./noema.js";
 export * from "./strategy.js";
 export * from "./pancakeswap-v3.js";
