@@ -1,16 +1,28 @@
 import type {
   EvidencePacket,
   ExecutableQuote,
+  ExecutionReceipt,
   FinancialAgentStrategy,
   ObservationSnapshot,
   OutcomeRecord,
   StrategyProposal,
   StrategyRunContext
 } from "@kumo/financial-agent-kernel";
+import type {
+  NoemaAgentAssessment,
+  NoemaAgentClaim,
+  NoemaStandardAgent
+} from "@kumo/noema-agent-profile";
 import {
   chooseCenteredTicks,
   evaluateRebalanceEconomics
 } from "./economics.js";
+import {
+  buildLiquidityPositionEconomicObject,
+  buildRebalanceMandate,
+  buildRebalancerNoemaAssessment,
+  type LiquidityPositionEconomicState
+} from "./noema.js";
 import type {
   RebalancePolicy,
   RebalancerMarketState,
@@ -29,6 +41,13 @@ function root(parts: Array<string | number | boolean | undefined>): string {
   return parts.map((part) => String(part ?? "")).join("|");
 }
 
+function noemaClaimKind(claim: NoemaAgentClaim): "observation" | "source-assertion" | "inference" | "assumption" {
+  if (claim.state === "INFERRED") return "inference";
+  if (claim.state === "UNKNOWN") return "assumption";
+  if (claim.state === "SOURCED" || claim.state === "ATTESTED") return "source-assertion";
+  return "observation";
+}
+
 export interface PancakeV3RebalancerOptions {
   agentId: string;
   positionId: string;
@@ -37,19 +56,27 @@ export interface PancakeV3RebalancerOptions {
   feeModel: RebalancerFeeModel;
   riskModel: RebalancerRiskModel;
   performance: RebalancerPerformanceProvider;
+  mandatePrincipal?: string;
   tickSpacing?: number;
   clock?: () => string;
 }
 
-export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
+export class PancakeV3RebalancerStrategy
+  implements FinancialAgentStrategy, NoemaStandardAgent<LiquidityPositionEconomicState> {
   readonly id = "kumo-pancakeswap-v3-rebalancer-v1";
   readonly category = "rebalancing" as const;
   private readonly clock: () => string;
   private lastPosition?: RebalancerPosition;
   private lastMarket?: RebalancerMarketState;
+  private lastNoemaObject?: ReturnType<typeof buildLiquidityPositionEconomicObject>;
+  private lastNoemaAssessment?: NoemaAgentAssessment<LiquidityPositionEconomicState>;
 
   constructor(private readonly options: PancakeV3RebalancerOptions) {
     this.clock = options.clock ?? (() => new Date().toISOString());
+  }
+
+  getNoemaAssessment(): NoemaAgentAssessment<LiquidityPositionEconomicState> | undefined {
+    return this.lastNoemaAssessment;
   }
 
   async observe(context: StrategyRunContext): Promise<ObservationSnapshot> {
@@ -106,6 +133,17 @@ export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
   }): Promise<EvidencePacket> {
     if (!this.lastPosition || !this.lastMarket) throw new Error("REBALANCER_OBSERVATION_REQUIRED");
     const createdAt = this.clock();
+    const evaluatedAt = Date.parse(createdAt);
+    if (!Number.isFinite(evaluatedAt)) throw new Error("REBALANCER_INVALID_CLOCK");
+
+    this.lastNoemaObject = buildLiquidityPositionEconomicObject({
+      position: this.lastPosition,
+      market: this.lastMarket,
+      policy: this.options.policy,
+      venueSourceRef: this.options.venue.id,
+      evaluatedAt
+    });
+
     return {
       id: `evidence:${this.lastPosition.positionId}:${createdAt}`,
       agentId: this.options.agentId,
@@ -113,25 +151,19 @@ export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
       createdAt,
       evidenceRoot: root([
         input.observation.marketSnapshotRoot,
-        this.lastPosition.observedAt,
-        this.lastMarket.observedAt,
-        this.lastMarket.blockNumber
+        this.lastNoemaObject.id,
+        this.lastNoemaObject.version,
+        this.lastNoemaObject.status,
+        this.lastNoemaObject.verification.status
       ]),
-      claims: [
-        {
-          id: "position-range-state",
-          kind: "observation",
-          statement: this.lastPosition.inRange ? "Position is currently in range" : "Position is currently out of range",
-          supportRefs: input.observation.evidenceRefs
-        },
-        {
-          id: "pool-liquidity-state",
-          kind: "observation",
-          statement: `Pool liquidity observed at ${this.lastMarket.liquidityUsd} USD`,
-          supportRefs: input.observation.evidenceRefs
-        }
-      ],
-      sourceRefs: input.observation.evidenceRefs
+      claims: this.lastNoemaObject.claims.map((claim) => ({
+        id: claim.id,
+        kind: noemaClaimKind(claim),
+        statement: `${claim.property}=${JSON.stringify(claim.value)} [${claim.state}]`,
+        supportRefs: claim.evidenceRefs,
+        confidence: claim.confidence
+      })),
+      sourceRefs: this.lastNoemaObject.evidence.map((evidence) => evidence.id)
     };
   }
 
@@ -140,7 +172,9 @@ export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
     observation: ObservationSnapshot;
     evidence: EvidencePacket;
   }): Promise<StrategyProposal> {
-    if (!this.lastPosition || !this.lastMarket) throw new Error("REBALANCER_OBSERVATION_REQUIRED");
+    if (!this.lastPosition || !this.lastMarket || !this.lastNoemaObject) {
+      throw new Error("REBALANCER_NOEMA_OBJECT_REQUIRED");
+    }
 
     const target = chooseCenteredTicks({
       currentTick: this.lastPosition.currentTick,
@@ -179,7 +213,34 @@ export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
     });
 
     const createdAt = this.clock();
-    const expiresAt = new Date(Date.parse(createdAt) + this.options.policy.proposalTtlSeconds * 1000).toISOString();
+    const evaluatedAt = Date.parse(createdAt);
+    if (!Number.isFinite(evaluatedAt)) throw new Error("REBALANCER_INVALID_CLOCK");
+
+    const mandate = buildRebalanceMandate({
+      positionId: this.lastPosition.positionId,
+      principal: this.options.mandatePrincipal ?? "kumo:reference-agent-policy",
+      policy: this.options.policy
+    });
+
+    this.lastNoemaAssessment = buildRebalancerNoemaAssessment({
+      economicObject: this.lastNoemaObject,
+      mandate,
+      economics,
+      policy: this.options.policy,
+      feeModelRef: this.options.feeModel.id,
+      riskModelRef: this.options.riskModel.id,
+      evaluatedAt
+    });
+
+    const noemaAllows = this.lastNoemaAssessment.evaluation.decision === "ALLOW";
+    const shouldPropose = economics.shouldRebalance && noemaAllows;
+    const refusalReasons = [
+      ...economics.reasons,
+      ...(!noemaAllows
+        ? this.lastNoemaAssessment.evaluation.reasonCodes.map((reason) => `NOEMA:${reason}`)
+        : [])
+    ];
+    const expiresAt = new Date(evaluatedAt + this.options.policy.proposalTtlSeconds * 1000).toISOString();
 
     return {
       id: `proposal:${this.lastPosition.positionId}:${createdAt}`,
@@ -189,19 +250,19 @@ export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
       createdAt,
       expiresAt,
       objective: "Keep a PancakeSwap V3 LP position productively in range when executable net benefit justifies repositioning",
-      action: economics.shouldRebalance
+      action: shouldPropose
         ? `Recenter position ${this.lastPosition.positionId} to ticks ${target.tickLower}:${target.tickUpper}`
         : `Hold position ${this.lastPosition.positionId}`,
-      disposition: economics.shouldRebalance ? "propose" : "refuse",
-      rationale: economics.shouldRebalance
-        ? `Expected net benefit ${economics.expectedNetBenefitUsd.toFixed(2)} USD after estimated IL and execution costs`
-        : `Rebalance refused: ${economics.reasons.join(", ")}`,
+      disposition: shouldPropose ? "propose" : "refuse",
+      rationale: shouldPropose
+        ? `Noema mandate ALLOW; expected net benefit ${economics.expectedNetBenefitUsd.toFixed(2)} USD after estimated IL and execution costs`
+        : `Rebalance refused: ${refusalReasons.join(", ")}`,
       expectedNetBenefit: economics.expectedNetBenefitUsd,
       estimatedCost: economics.estimatedTotalCostUsd,
       evidencePacketRef: input.evidence.id,
       evidenceSnapshotRoot: input.evidence.evidenceRoot,
       marketSnapshotRoot: input.observation.marketSnapshotRoot,
-      refusalReasons: economics.reasons
+      refusalReasons
     };
   }
 
@@ -256,7 +317,7 @@ export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
 
   async measure(input: {
     context: StrategyRunContext;
-    receipt: { id: string };
+    receipt: ExecutionReceipt;
     baselineRef?: string;
   }): Promise<OutcomeRecord> {
     const result = await this.options.performance.measure({
@@ -275,7 +336,7 @@ export class PancakeV3RebalancerStrategy implements FinancialAgentStrategy {
 
     return {
       id: `outcome:${input.receipt.id}:${result.measuredAt}`,
-      proposalId: input.receipt.id,
+      proposalId: input.receipt.proposalId,
       receiptId: input.receipt.id,
       measuredAt: result.measuredAt,
       baselineRef: input.baselineRef,
