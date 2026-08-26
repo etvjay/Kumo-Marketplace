@@ -51,11 +51,26 @@ function serviceEndpoint(record: JsonRecord): string | undefined {
   const direct = text(record.endpoint) ?? text(record.endpointUrl) ?? text(record.url);
   if (direct) return direct;
   const services = record.services;
-  if (!Array.isArray(services)) return undefined;
-  for (const value of services) {
-    const service = asRecord(value);
-    const endpoint = service && text(service.endpoint);
-    if (endpoint?.startsWith("http://") || endpoint?.startsWith("https://")) return endpoint;
+  if (Array.isArray(services)) {
+    for (const value of services) {
+      const service = asRecord(value);
+      const endpoint = service && (text(service.endpoint) ?? text(service.url));
+      if (endpoint?.startsWith("http://") || endpoint?.startsWith("https://")) return endpoint;
+    }
+  }
+
+  // Older registry payloads may expose endpoints rather than services. Preserve
+  // compatibility without inferring a transport/capability from the URL alone.
+  const endpoints = record.endpoints;
+  if (Array.isArray(endpoints)) {
+    for (const value of endpoints) {
+      if (typeof value === "string" && (value.startsWith("http://") || value.startsWith("https://"))) {
+        return value;
+      }
+      const endpointRecord = asRecord(value);
+      const endpoint = endpointRecord && (text(endpointRecord.endpoint) ?? text(endpointRecord.url));
+      if (endpoint?.startsWith("http://") || endpoint?.startsWith("https://")) return endpoint;
+    }
   }
   return undefined;
 }
@@ -63,11 +78,12 @@ function serviceEndpoint(record: JsonRecord): string | undefined {
 function normalizeAgent(raw: unknown): AgentProfile | undefined {
   const record = asRecord(raw);
   if (!record) return undefined;
-  const tokenId = number(record.tokenId) ?? number(record.agentId) ?? number(record.id);
-  const chainId = number(record.chainId) ?? number(asRecord(record.chain)?.id);
-  const registry = text(record.registry) ?? text(record.agentRegistry) ?? text(record.registryAddress);
-  const owner = text(record.owner) ?? text(record.ownerAddress);
-  const name = text(record.name) ?? text(asRecord(record.metadata)?.name) ?? (tokenId !== undefined ? `Agent ${tokenId}` : undefined);
+  const tokenId = number(record.tokenId) ?? number(record.token_id) ?? number(record.agentId) ?? number(record.agent_id) ?? number(record.id);
+  const chainId = number(record.chainId) ?? number(record.chain_id) ?? number(asRecord(record.chain)?.id);
+  const registry = text(record.registry) ?? text(record.agentRegistry) ?? text(record.agent_registry) ?? text(record.registryAddress) ?? text(record.registry_address);
+  const owner = text(record.owner) ?? text(record.ownerAddress) ?? text(record.owner_address);
+  const metadata = asRecord(record.metadata);
+  const name = text(record.name) ?? text(metadata?.name) ?? (tokenId !== undefined ? `Agent ${tokenId}` : undefined);
   if (!name || tokenId === undefined) return undefined;
 
   const identity: AgentIdentity = {
@@ -78,8 +94,8 @@ function normalizeAgent(raw: unknown): AgentProfile | undefined {
     registry
   };
 
-  const endpointUrl = serviceEndpoint(record) ?? serviceEndpoint(asRecord(record.metadata) ?? {});
-  const description = text(record.description) ?? text(asRecord(record.metadata)?.description) ?? "ERC-8004 registered agent";
+  const endpointUrl = serviceEndpoint(record) ?? serviceEndpoint(metadata ?? {});
+  const description = text(record.description) ?? text(metadata?.description) ?? "ERC-8004 registered agent";
 
   return {
     id: chainId !== undefined ? `erc8004:${chainId}:${tokenId}` : `erc8004:${tokenId}`,
@@ -88,9 +104,16 @@ function normalizeAgent(raw: unknown): AgentProfile | undefined {
     status: "unknown",
     description,
     categories: [],
+
+    // Registry chain is evidence of identity origin, not proof that the agent
+    // can execute financial work on that chain or any other chain.
+    originChainIds: chainId !== undefined ? [chainId] : [],
+    executionVenues: [],
     supportedChains: chainId !== undefined ? [chainId] : [],
+
     capabilities: [],
     endpointUrl,
+    connectionSurfaces: [],
     supportedTransports: [],
     identities: [identity],
     legacy: { raw8004scan: record }
@@ -113,7 +136,7 @@ export class Eight004ScanProvider implements DiscoveryProvider, IdentityProvider
     const url = `${this.baseUrl}${path}`;
     const observedAt = new Date().toISOString();
     const headers: Record<string, string> = { accept: "application/json" };
-    if (this.apiKey) headers.authorization = `Bearer ${this.apiKey}`;
+    if (this.apiKey) headers["X-API-Key"] = this.apiKey;
     const response = await this.fetchImpl(url, { headers });
     if (!response.ok) throw new Error(`8004scan ${response.status} for ${path}`);
     return {
@@ -138,7 +161,8 @@ export class Eight004ScanProvider implements DiscoveryProvider, IdentityProvider
     const [, chainId, tokenId] = match;
     const { payload, evidence } = await this.request(`/agents/${chainId}/${tokenId}`);
     const root = asRecord(payload);
-    const raw = root?.agent ?? root?.data ?? payload;
+    const data = asRecord(root?.data);
+    const raw = root?.agent ?? data?.agent ?? root?.data ?? payload;
     const agent = normalizeAgent(raw);
     if (!agent) throw new Error(`8004scan returned an unrecognized agent shape for ${agentRef}`);
     return { agent, evidence };
