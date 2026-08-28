@@ -83,6 +83,7 @@ export class GeckoTerminalBscMarketDataProvider {
   private readonly baseUrl: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly requestCache = new Map<string, Promise<unknown>>();
 
   constructor(options: GeckoTerminalMarketDataOptions = {}) {
     this.baseUrl = (options.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
@@ -173,7 +174,19 @@ export class GeckoTerminalBscMarketDataProvider {
     };
   }
 
-  private async request(url: string): Promise<unknown> {
+  private request(url: string): Promise<unknown> {
+    const existing = this.requestCache.get(url);
+    if (existing) return existing;
+
+    const request = this.fetchJson(url).catch((error) => {
+      this.requestCache.delete(url);
+      throw error;
+    });
+    this.requestCache.set(url, request);
+    return request;
+  }
+
+  private async fetchJson(url: string): Promise<unknown> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     try {
