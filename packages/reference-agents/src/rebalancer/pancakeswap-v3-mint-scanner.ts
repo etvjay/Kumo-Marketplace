@@ -57,6 +57,7 @@ export interface PancakeV3MintDiscovery {
   fromBlock: string;
   toBlock: string;
   chunksScanned: number;
+  adaptiveSplits: number;
   mintEventsSeen: number;
   survivingPositions: PancakeV3PositionDiscoveryEntry[];
 }
@@ -70,6 +71,32 @@ export interface PancakeV3MintScannerOptions {
   maxMintEvents?: number;
 }
 
+function errorText(error: unknown): string {
+  if (error instanceof Error) {
+    const cause = (error as Error & { cause?: unknown }).cause;
+    return `${error.message}\n${cause ? errorText(cause) : ""}`.toLowerCase();
+  }
+  return String(error).toLowerCase();
+}
+
+function isLogRangeLimitError(error: unknown): boolean {
+  const message = errorText(error);
+  return message.includes("limit exceeded")
+    || message.includes("query returned more than")
+    || message.includes("response size exceeded")
+    || message.includes("too many results")
+    || message.includes("block range") && message.includes("limit")
+    || message.includes("eth_getlogs") && message.includes("limit");
+}
+
+function compareLogs(a: { blockNumber: bigint | null; logIndex: number | null }, b: { blockNumber: bigint | null; logIndex: number | null }): number {
+  const blockA = a.blockNumber ?? 0n;
+  const blockB = b.blockNumber ?? 0n;
+  if (blockA < blockB) return -1;
+  if (blockA > blockB) return 1;
+  return (a.logIndex ?? 0) - (b.logIndex ?? 0);
+}
+
 /**
  * Finds recent NPM mints from finalized Transfer(0x0 -> owner, tokenId) logs,
  * then revalidates each token with ownerOf/positions at the same finalized head.
@@ -80,7 +107,7 @@ export async function discoverRecentSurvivingPancakeV3Mints(
 ): Promise<PancakeV3MintDiscovery> {
   if (!options.rpcUrl) throw new Error("BSC_RPC_URL_REQUIRED");
   const lookbackBlocks = Math.max(100, Math.min(100_000, options.lookbackBlocks ?? 20_000));
-  const chunkSize = Math.max(100, Math.min(5_000, options.chunkSize ?? 2_000));
+  const chunkSize = Math.max(16, Math.min(5_000, options.chunkSize ?? 2_000));
   const maxMintEvents = Math.max(1, Math.min(512, options.maxMintEvents ?? 192));
   const positionManager = getAddress(
     options.nonfungiblePositionManager ?? PANCAKESWAP_V3_BSC.nonfungiblePositionManager
@@ -99,22 +126,41 @@ export async function discoverRecentSurvivingPancakeV3Mints(
   const tokenIds: bigint[] = [];
   const seen = new Set<string>();
   let chunksScanned = 0;
+  let adaptiveSplits = 0;
   let mintEventsSeen = 0;
-  let cursorTo = head.number;
 
+  async function readMintLogs(fromBlock: bigint, toBlock: bigint): Promise<Awaited<ReturnType<typeof client.getLogs>>> {
+    chunksScanned += 1;
+    try {
+      return await client.getLogs({
+        address: positionManager,
+        event: TRANSFER_EVENT,
+        args: { from: ZERO_ADDRESS },
+        fromBlock,
+        toBlock
+      });
+    } catch (error) {
+      if (!isLogRangeLimitError(error)) throw error;
+      if (fromBlock >= toBlock) {
+        throw new Error(`PANCAKE_MINT_LOG_SINGLE_BLOCK_LIMIT:${fromBlock.toString()}:${errorText(error)}`);
+      }
+      adaptiveSplits += 1;
+      const midpoint = fromBlock + (toBlock - fromBlock) / 2n;
+      const [left, right] = await Promise.all([
+        readMintLogs(fromBlock, midpoint),
+        readMintLogs(midpoint + 1n, toBlock)
+      ]);
+      return [...left, ...right].sort(compareLogs);
+    }
+  }
+
+  let cursorTo = head.number;
   while (cursorTo >= oldest && tokenIds.length < maxMintEvents) {
     const proposedFrom = cursorTo >= BigInt(chunkSize - 1)
       ? cursorTo - BigInt(chunkSize - 1)
       : 0n;
     const cursorFrom = proposedFrom < oldest ? oldest : proposedFrom;
-    const logs = await client.getLogs({
-      address: positionManager,
-      event: TRANSFER_EVENT,
-      args: { from: ZERO_ADDRESS },
-      fromBlock: cursorFrom,
-      toBlock: cursorTo
-    });
-    chunksScanned += 1;
+    const logs = await readMintLogs(cursorFrom, cursorTo);
     mintEventsSeen += logs.length;
 
     for (const log of [...logs].reverse()) {
@@ -182,6 +228,7 @@ export async function discoverRecentSurvivingPancakeV3Mints(
     fromBlock: oldest.toString(),
     toBlock: head.number.toString(),
     chunksScanned,
+    adaptiveSplits,
     mintEventsSeen,
     survivingPositions
   };
