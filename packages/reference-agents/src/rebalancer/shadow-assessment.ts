@@ -26,6 +26,11 @@ import type {
   RebalancerPosition
 } from "./types.js";
 
+const EXPECTED_GECKO_PANCAKE_V3_DEX_IDS = new Set([
+  "pancakeswap_v3",
+  "pancakeswap-v3-bsc"
+]);
+
 export interface RebalancerLiveShadowAssessment {
   mode: "SHADOW";
   preparedPositionId: string;
@@ -65,7 +70,9 @@ export async function assessPancakeV3LiveShadow(input: {
   ]);
 
   if (marketData.poolAddress !== input.prepared.snapshot.pool) throw new Error("SHADOW_POOL_IDENTITY_MISMATCH");
-  if (marketData.dexId !== "pancakeswap_v3") throw new Error(`SHADOW_UNEXPECTED_DEX:${marketData.dexId}`);
+  if (!EXPECTED_GECKO_PANCAKE_V3_DEX_IDS.has(marketData.dexId)) {
+    throw new Error(`SHADOW_UNEXPECTED_DEX:${marketData.dexId}`);
+  }
 
   const realizedVolatilityAnnualized = realizedHourlyVolatilityAnnualized(ohlcv.candles);
   const grossPoolFeeAprEstimate = grossPoolFeeApr({
@@ -133,7 +140,8 @@ export async function assessPancakeV3LiveShadow(input: {
       baselineId: input.prepared.baseline.id,
       feeValueSemantics: "CRYSTALLIZED_FEE_FLOOR_ONLY",
       marketDataEvidenceRef: marketData.evidenceRef,
-      ohlcvEvidenceRef: ohlcv.evidenceRef
+      ohlcvEvidenceRef: ohlcv.evidenceRef,
+      geckoDexId: marketData.dexId
     }
   };
 
