@@ -52,6 +52,16 @@ const BSC = {
   rpcUrls: { default: { http: [] as string[] } }
 } as const;
 
+type MintTransferLog = {
+  blockNumber: bigint | null;
+  logIndex: number | null;
+  args: {
+    from?: Address;
+    to?: Address;
+    tokenId?: bigint;
+  };
+};
+
 export interface PancakeV3MintDiscovery {
   snapshot: ChainSnapshot;
   fromBlock: string;
@@ -89,7 +99,7 @@ function isLogRangeLimitError(error: unknown): boolean {
     || message.includes("eth_getlogs") && message.includes("limit");
 }
 
-function compareLogs(a: { blockNumber: bigint | null; logIndex: number | null }, b: { blockNumber: bigint | null; logIndex: number | null }): number {
+function compareLogs(a: MintTransferLog, b: MintTransferLog): number {
   const blockA = a.blockNumber ?? 0n;
   const blockB = b.blockNumber ?? 0n;
   if (blockA < blockB) return -1;
@@ -129,16 +139,17 @@ export async function discoverRecentSurvivingPancakeV3Mints(
   let adaptiveSplits = 0;
   let mintEventsSeen = 0;
 
-  async function readMintLogs(fromBlock: bigint, toBlock: bigint): Promise<Awaited<ReturnType<typeof client.getLogs>>> {
+  async function readMintLogs(fromBlock: bigint, toBlock: bigint): Promise<MintTransferLog[]> {
     chunksScanned += 1;
     try {
-      return await client.getLogs({
+      const logs = await client.getLogs({
         address: positionManager,
         event: TRANSFER_EVENT,
         args: { from: ZERO_ADDRESS },
         fromBlock,
         toBlock
       });
+      return logs as MintTransferLog[];
     } catch (error) {
       if (!isLogRangeLimitError(error)) throw error;
       if (fromBlock >= toBlock) {
