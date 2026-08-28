@@ -37,7 +37,10 @@ jobs:
 
       - name: Assess a live Pancake V3 position in shadow mode
         env:
-          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          # Official BNB public mainnet endpoints disable eth_getLogs. This
+          # workflow needs logs only for discovery; all selected positions are
+          # subsequently re-read and block-bound on finalized BSC state.
+          BSC_RPC_URL: https://bsc-rpc.publicnode.com
           KUMO_PANCAKE_SCAN_LIMIT: "64"
           KUMO_EVIDENCE_PATH: evidence/live/rebalancer-shadow-probe.json
         run: node scripts/rebalancer-shadow-probe.mjs
