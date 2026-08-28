@@ -99,8 +99,8 @@ try {
         rpcUrl,
         rpcProviderId,
         pool,
-        lookbackBlocks: Number(process.env.KUMO_POOL_LOOKBACK_BLOCKS || "50000"),
-        maxTransactions: Number(process.env.KUMO_POOL_MAX_TRANSACTIONS || "96")
+        lookbackBlocks: Number(process.env.KUMO_POOL_LOOKBACK_BLOCKS || "5000"),
+        maxTransactions: Number(process.env.KUMO_POOL_MAX_TRANSACTIONS || "48")
       });
       const supported = result.survivingPositions.filter((position) =>
         position.liquidity > 0n
