@@ -5,13 +5,17 @@ import {
   GeckoTerminalBscMarketDataProvider,
   PancakeV3BscReader,
   assessPancakeV3LiveShadow,
-  discoverRecentSurvivingPancakeV3Mints,
+  discoverRecentPancakeV3PositionsForPool,
   preparePancakeV3LivePosition
 } from "../packages/reference-agents/dist/rebalancer/index.js";
 
 const rpcUrl = process.env.BSC_RPC_URL || "https://bsc-dataseed.bnbchain.org";
 const maxCandidates = Number(process.env.KUMO_PANCAKE_SCAN_LIMIT || "64");
 const preferredTokenIds = (process.env.KUMO_PREFERRED_TOKEN_IDS || "7255622")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
+const preferredPools = (process.env.KUMO_PREFERRED_POOL_ADDRESSES || "0x172fcD41E0913e95784454622d1c3724f546f849")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
@@ -47,9 +51,10 @@ const output = {
   rpcProvider: new URL(rpcUrl).hostname,
   policy,
   preferredTokenIds,
+  preferredPools,
   status: "STARTED",
   discovery: undefined,
-  mintDiscovery: undefined,
+  poolDiscovery: [],
   selectedCandidate: undefined,
   preparation: undefined,
   shadowAssessment: undefined,
@@ -77,8 +82,8 @@ try {
   const candidateIds = [];
   const seen = new Set();
 
-  // Prior evidence is a locator hint only. It is never accepted without a
-  // fresh finalized ownerOf/positions read through the normal preparation path.
+  // Prior evidence is a locator hint only. It must survive a fresh finalized
+  // ownerOf/positions read later before it can become current evidence.
   for (const tokenId of preferredTokenIds) {
     if (!seen.has(tokenId)) {
       seen.add(tokenId);
@@ -86,37 +91,49 @@ try {
     }
   }
 
-  const mintDiscovery = await discoverRecentSurvivingPancakeV3Mints({
-    rpcUrl,
-    rpcProviderId,
-    lookbackBlocks: Number(process.env.KUMO_MINT_LOOKBACK_BLOCKS || "20000"),
-    chunkSize: Number(process.env.KUMO_MINT_CHUNK_SIZE || "2000"),
-    maxMintEvents: Number(process.env.KUMO_MAX_MINT_EVENTS || "192")
-  });
-  const supportedRecentMints = mintDiscovery.survivingPositions.filter((position) =>
-    position.liquidity > 0n
-    && priceProvider.supports(position.token0)
-    && priceProvider.supports(position.token1)
-  );
-  output.mintDiscovery = {
-    snapshot: mintDiscovery.snapshot,
-    fromBlock: mintDiscovery.fromBlock,
-    toBlock: mintDiscovery.toBlock,
-    chunksScanned: mintDiscovery.chunksScanned,
-    mintEventsSeen: mintDiscovery.mintEventsSeen,
-    survivingPositions: mintDiscovery.survivingPositions.length,
-    supportedCandidates: supportedRecentMints.map((position) => position.tokenId)
-  };
-
-  for (const position of supportedRecentMints) {
-    if (!seen.has(position.tokenId)) {
-      seen.add(position.tokenId);
-      candidateIds.push({ tokenId: position.tokenId, source: "RECENT_SURVIVING_MINT" });
+  // Primary discovery is venue-scoped. This avoids querying the global NPM
+  // Transfer firehose, which the public BSC RPC can reject even for one busy block.
+  for (const pool of preferredPools) {
+    try {
+      const result = await discoverRecentPancakeV3PositionsForPool({
+        rpcUrl,
+        rpcProviderId,
+        pool,
+        lookbackBlocks: Number(process.env.KUMO_POOL_LOOKBACK_BLOCKS || "50000"),
+        maxTransactions: Number(process.env.KUMO_POOL_MAX_TRANSACTIONS || "96")
+      });
+      const supported = result.survivingPositions.filter((position) =>
+        position.liquidity > 0n
+        && priceProvider.supports(position.token0)
+        && priceProvider.supports(position.token1)
+      );
+      output.poolDiscovery.push({
+        snapshot: result.snapshot,
+        pool: result.pool,
+        fromBlock: result.fromBlock,
+        toBlock: result.toBlock,
+        poolMintEvents: result.poolMintEvents,
+        transactionsInspected: result.transactionsInspected,
+        tokenIdsResolved: result.tokenIdsResolved,
+        survivingPositions: result.survivingPositions.length,
+        supportedCandidates: supported.map((position) => position.tokenId)
+      });
+      for (const position of supported) {
+        if (!seen.has(position.tokenId)) {
+          seen.add(position.tokenId);
+          candidateIds.push({ tokenId: position.tokenId, source: `POOL_ACTIVITY:${result.pool}` });
+        }
+      }
+    } catch (error) {
+      output.rejections.push({
+        pool,
+        stage: "POOL_DISCOVERY",
+        reason: error instanceof Error ? error.message : String(error)
+      });
     }
   }
 
-  // Enumeration remains a final independent discovery lane. It can catch long-
-  // lived positions that were minted outside the recent event lookback window.
+  // Enumeration is an independent fallback for long-lived positions.
   const discovery = await reader.discoverRecentPositions(maxCandidates);
   const supportedInEnumeration = discovery.positions.filter((position) =>
     position.liquidity > 0n
