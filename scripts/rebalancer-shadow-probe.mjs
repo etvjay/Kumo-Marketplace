@@ -5,6 +5,7 @@ import {
   GeckoTerminalBscMarketDataProvider,
   PancakeV3BscReader,
   assessPancakeV3LiveShadow,
+  discoverRecentSurvivingPancakeV3Mints,
   preparePancakeV3LivePosition
 } from "../packages/reference-agents/dist/rebalancer/index.js";
 
@@ -48,6 +49,7 @@ const output = {
   preferredTokenIds,
   status: "STARTED",
   discovery: undefined,
+  mintDiscovery: undefined,
   selectedCandidate: undefined,
   preparation: undefined,
   shadowAssessment: undefined,
@@ -60,22 +62,23 @@ async function persist() {
 }
 
 try {
+  const rpcProviderId = new URL(rpcUrl).hostname;
   const reader = new PancakeV3BscReader({
     rpcUrl,
-    rpcProviderId: new URL(rpcUrl).hostname,
+    rpcProviderId,
     purpose: "evidence"
   });
   const priceProvider = new ChainlinkBscUsdPriceProvider({
     rpcUrl,
-    rpcProviderId: new URL(rpcUrl).hostname
+    rpcProviderId
   });
   const marketDataProvider = new GeckoTerminalBscMarketDataProvider();
 
   const candidateIds = [];
   const seen = new Set();
 
-  // Previously evidenced token IDs are hints only. Every one is re-read from
-  // current finalized BSC state and must pass the exact same preparation path.
+  // Prior evidence is a locator hint only. It is never accepted without a
+  // fresh finalized ownerOf/positions read through the normal preparation path.
   for (const tokenId of preferredTokenIds) {
     if (!seen.has(tokenId)) {
       seen.add(tokenId);
@@ -83,23 +86,52 @@ try {
     }
   }
 
+  const mintDiscovery = await discoverRecentSurvivingPancakeV3Mints({
+    rpcUrl,
+    rpcProviderId,
+    lookbackBlocks: Number(process.env.KUMO_MINT_LOOKBACK_BLOCKS || "20000"),
+    chunkSize: Number(process.env.KUMO_MINT_CHUNK_SIZE || "2000"),
+    maxMintEvents: Number(process.env.KUMO_MAX_MINT_EVENTS || "192")
+  });
+  const supportedRecentMints = mintDiscovery.survivingPositions.filter((position) =>
+    position.liquidity > 0n
+    && priceProvider.supports(position.token0)
+    && priceProvider.supports(position.token1)
+  );
+  output.mintDiscovery = {
+    snapshot: mintDiscovery.snapshot,
+    fromBlock: mintDiscovery.fromBlock,
+    toBlock: mintDiscovery.toBlock,
+    chunksScanned: mintDiscovery.chunksScanned,
+    mintEventsSeen: mintDiscovery.mintEventsSeen,
+    survivingPositions: mintDiscovery.survivingPositions.length,
+    supportedCandidates: supportedRecentMints.map((position) => position.tokenId)
+  };
+
+  for (const position of supportedRecentMints) {
+    if (!seen.has(position.tokenId)) {
+      seen.add(position.tokenId);
+      candidateIds.push({ tokenId: position.tokenId, source: "RECENT_SURVIVING_MINT" });
+    }
+  }
+
+  // Enumeration remains a final independent discovery lane. It can catch long-
+  // lived positions that were minted outside the recent event lookback window.
   const discovery = await reader.discoverRecentPositions(maxCandidates);
+  const supportedInEnumeration = discovery.positions.filter((position) =>
+    position.liquidity > 0n
+    && priceProvider.supports(position.token0)
+    && priceProvider.supports(position.token1)
+  );
   output.discovery = {
     snapshot: discovery.snapshot,
     totalSupply: discovery.totalSupply,
     scanned: discovery.scanned,
-    supportedInScan: discovery.positions
-      .filter((position) => position.liquidity > 0n && priceProvider.supports(position.token0) && priceProvider.supports(position.token1))
-      .map((position) => position.tokenId)
+    supportedInScan: supportedInEnumeration.map((position) => position.tokenId)
   };
 
-  for (const position of discovery.positions) {
-    if (
-      position.liquidity > 0n
-      && priceProvider.supports(position.token0)
-      && priceProvider.supports(position.token1)
-      && !seen.has(position.tokenId)
-    ) {
+  for (const position of supportedInEnumeration) {
+    if (!seen.has(position.tokenId)) {
       seen.add(position.tokenId);
       candidateIds.push({ tokenId: position.tokenId, source: "CURRENT_ENUMERATION" });
     }
@@ -172,7 +204,7 @@ try {
 
   if (!output.shadowAssessment) {
     output.status = candidateIds.length === 0
-      ? "NO_SUPPORTED_LIVE_POSITION_IN_SCAN_WINDOW"
+      ? "NO_SUPPORTED_LIVE_POSITION_DISCOVERED"
       : "NO_CANDIDATE_COMPLETED_SHADOW_ASSESSMENT";
   }
 } catch (error) {
