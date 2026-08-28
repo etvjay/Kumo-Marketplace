@@ -1,6 +1,5 @@
 import {
   createPublicClient,
-  decodeEventLog,
   getAddress,
   http,
   parseAbiItem,
@@ -76,6 +75,12 @@ type PoolMintLog = {
   transactionHash: Hash | null;
 };
 
+type IncreaseLiquidityLog = {
+  blockNumber: bigint | null;
+  transactionHash: Hash | null;
+  args: { tokenId?: bigint; liquidity?: bigint };
+};
+
 export interface PancakeV3PoolPositionDiscovery {
   snapshot: ChainSnapshot;
   pool: Address;
@@ -83,6 +88,7 @@ export interface PancakeV3PoolPositionDiscovery {
   toBlock: string;
   poolMintEvents: number;
   transactionsInspected: number;
+  npmBlocksInspected: number;
   tokenIdsResolved: string[];
   survivingPositions: PancakeV3PositionDiscoveryEntry[];
 }
@@ -111,9 +117,12 @@ function isRangeLimit(error: unknown): boolean {
 
 /**
  * Pool-scoped position discovery avoids the global NPM Transfer firehose.
- * We find recent Pool.Mint transactions, decode NPM IncreaseLiquidity tokenIds
- * from those exact transaction receipts, then revalidate each NFT against the
- * requested pool at the same finalized head.
+ * We find recent Pool.Mint transactions, query NPM IncreaseLiquidity logs for
+ * those exact blocks, correlate by transaction hash, then revalidate each NFT
+ * against the requested pool at the same finalized head.
+ *
+ * This deliberately avoids historical transaction-receipt APIs: some public
+ * RPCs expose eth_getLogs but gate archive receipts behind credentials.
  */
 export async function discoverRecentPancakeV3PositionsForPool(
   options: PancakeV3PoolPositionScannerOptions
@@ -167,36 +176,42 @@ export async function discoverRecentPancakeV3PositionsForPool(
     return (b.logIndex ?? 0) - (a.logIndex ?? 0);
   });
 
-  const transactionHashes: Hash[] = [];
+  const selectedMints: Array<{ transactionHash: Hash; blockNumber: bigint }> = [];
   const seenTransactions = new Set<string>();
   for (const log of mintLogs) {
-    if (!log.transactionHash || seenTransactions.has(log.transactionHash)) continue;
+    if (!log.transactionHash || log.blockNumber === null || seenTransactions.has(log.transactionHash)) continue;
     seenTransactions.add(log.transactionHash);
-    transactionHashes.push(log.transactionHash);
-    if (transactionHashes.length >= maxTransactions) break;
+    selectedMints.push({ transactionHash: log.transactionHash, blockNumber: log.blockNumber });
+    if (selectedMints.length >= maxTransactions) break;
+  }
+
+  const targetTransactionsByBlock = new Map<string, Set<string>>();
+  for (const mint of selectedMints) {
+    const key = mint.blockNumber.toString();
+    const set = targetTransactionsByBlock.get(key) ?? new Set<string>();
+    set.add(mint.transactionHash.toLowerCase());
+    targetTransactionsByBlock.set(key, set);
   }
 
   const tokenIds: bigint[] = [];
   const seenTokenIds = new Set<string>();
-  for (const transactionHash of transactionHashes) {
-    const receipt = await client.getTransactionReceipt({ hash: transactionHash });
-    for (const log of receipt.logs) {
-      if (getAddress(log.address) !== positionManager) continue;
-      try {
-        const decoded = decodeEventLog({
-          abi: [INCREASE_LIQUIDITY_EVENT],
-          eventName: "IncreaseLiquidity",
-          data: log.data,
-          topics: log.topics
-        });
-        const tokenId = decoded.args.tokenId;
-        const key = tokenId.toString();
-        if (!seenTokenIds.has(key)) {
-          seenTokenIds.add(key);
-          tokenIds.push(tokenId);
-        }
-      } catch {
-        // Other NPM event in the same receipt.
+  for (const [blockKey, targetTransactions] of targetTransactionsByBlock) {
+    const blockNumber = BigInt(blockKey);
+    const increaseLogs = await client.getLogs({
+      address: positionManager,
+      event: INCREASE_LIQUIDITY_EVENT,
+      fromBlock: blockNumber,
+      toBlock: blockNumber
+    }) as IncreaseLiquidityLog[];
+
+    for (const log of increaseLogs) {
+      if (!log.transactionHash || !targetTransactions.has(log.transactionHash.toLowerCase())) continue;
+      const tokenId = log.args.tokenId;
+      if (tokenId === undefined) continue;
+      const key = tokenId.toString();
+      if (!seenTokenIds.has(key)) {
+        seenTokenIds.add(key);
+        tokenIds.push(tokenId);
       }
     }
   }
@@ -258,7 +273,8 @@ export async function discoverRecentPancakeV3PositionsForPool(
     fromBlock: oldest.toString(),
     toBlock: head.number.toString(),
     poolMintEvents: mintLogs.length,
-    transactionsInspected: transactionHashes.length,
+    transactionsInspected: selectedMints.length,
+    npmBlocksInspected: targetTransactionsByBlock.size,
     tokenIdsResolved: tokenIds.map((tokenId) => tokenId.toString()),
     survivingPositions
   };
