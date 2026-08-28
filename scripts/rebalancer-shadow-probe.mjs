@@ -10,6 +10,10 @@ import {
 
 const rpcUrl = process.env.BSC_RPC_URL || "https://bsc-dataseed.bnbchain.org";
 const maxCandidates = Number(process.env.KUMO_PANCAKE_SCAN_LIMIT || "64");
+const preferredTokenIds = (process.env.KUMO_PREFERRED_TOKEN_IDS || "7255622")
+  .split(",")
+  .map((value) => value.trim())
+  .filter(Boolean);
 const outputPath = process.env.KUMO_EVIDENCE_PATH || "evidence/live/rebalancer-shadow-probe.json";
 
 const policy = {
@@ -41,6 +45,7 @@ const output = {
   mode: "SHADOW_READ_ONLY",
   rpcProvider: new URL(rpcUrl).hostname,
   policy,
+  preferredTokenIds,
   status: "STARTED",
   discovery: undefined,
   selectedCandidate: undefined,
@@ -66,27 +71,64 @@ try {
   });
   const marketDataProvider = new GeckoTerminalBscMarketDataProvider();
 
+  const candidateIds = [];
+  const seen = new Set();
+
+  // Previously evidenced token IDs are hints only. Every one is re-read from
+  // current finalized BSC state and must pass the exact same preparation path.
+  for (const tokenId of preferredTokenIds) {
+    if (!seen.has(tokenId)) {
+      seen.add(tokenId);
+      candidateIds.push({ tokenId, source: "REVALIDATED_PRIOR_EVIDENCE" });
+    }
+  }
+
   const discovery = await reader.discoverRecentPositions(maxCandidates);
   output.discovery = {
     snapshot: discovery.snapshot,
     totalSupply: discovery.totalSupply,
-    scanned: discovery.scanned
+    scanned: discovery.scanned,
+    supportedInScan: discovery.positions
+      .filter((position) => position.liquidity > 0n && priceProvider.supports(position.token0) && priceProvider.supports(position.token1))
+      .map((position) => position.tokenId)
   };
 
-  const candidates = discovery.positions.filter((position) =>
-    position.liquidity > 0n
-    && priceProvider.supports(position.token0)
-    && priceProvider.supports(position.token1)
-  );
+  for (const position of discovery.positions) {
+    if (
+      position.liquidity > 0n
+      && priceProvider.supports(position.token0)
+      && priceProvider.supports(position.token1)
+      && !seen.has(position.tokenId)
+    ) {
+      seen.add(position.tokenId);
+      candidateIds.push({ tokenId: position.tokenId, source: "CURRENT_ENUMERATION" });
+    }
+  }
 
-  for (const candidate of candidates) {
+  for (const candidate of candidateIds) {
     const prepared = await preparePancakeV3LivePosition({
       tokenId: candidate.tokenId,
       reader,
       priceProvider
     });
     if (!prepared.ok) {
-      output.rejections.push({ tokenId: candidate.tokenId, stage: "PREPARATION", code: prepared.code, reason: prepared.reason });
+      output.rejections.push({
+        tokenId: candidate.tokenId,
+        source: candidate.source,
+        stage: "PREPARATION",
+        code: prepared.code,
+        reason: prepared.reason
+      });
+      continue;
+    }
+
+    if (!priceProvider.supports(prepared.snapshot.token0) || !priceProvider.supports(prepared.snapshot.token1)) {
+      output.rejections.push({
+        tokenId: candidate.tokenId,
+        source: candidate.source,
+        stage: "PRICE_SUPPORT",
+        reason: "CURRENT_POSITION_ASSETS_NOT_SUPPORTED_BY_CHAINLINK_PRICE_PROFILE"
+      });
       continue;
     }
 
@@ -99,6 +141,7 @@ try {
       });
       output.selectedCandidate = {
         tokenId: candidate.tokenId,
+        candidateSource: candidate.source,
         owner: prepared.snapshot.owner,
         pool: prepared.snapshot.pool,
         token0: prepared.snapshot.token0,
@@ -120,6 +163,7 @@ try {
     } catch (error) {
       output.rejections.push({
         tokenId: candidate.tokenId,
+        source: candidate.source,
         stage: "SHADOW_ASSESSMENT",
         reason: error instanceof Error ? error.message : String(error)
       });
@@ -127,7 +171,7 @@ try {
   }
 
   if (!output.shadowAssessment) {
-    output.status = candidates.length === 0
+    output.status = candidateIds.length === 0
       ? "NO_SUPPORTED_LIVE_POSITION_IN_SCAN_WINDOW"
       : "NO_CANDIDATE_COMPLETED_SHADOW_ASSESSMENT";
   }
