@@ -14,3 +14,4 @@ export * from "./strategy.js";
 export * from "./pancakeswap-v3.js";
 export * from "./pancakeswap-v3-reader.js";
 export * from "./pancakeswap-v3-mint-scanner.js";
+export * from "./pancakeswap-v3-pool-position-scanner.js";
