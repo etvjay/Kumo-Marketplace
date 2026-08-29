@@ -8,7 +8,7 @@ const outputPath = process.env.KUMO_EVIDENCE_PATH || "evidence/live/venus-core-r
 const rpcProviderId = new URL(rpcUrl).hostname;
 
 const output = {
-  schemaVersion: "kumo-venus-core-read-probe-v1",
+  schemaVersion: "kumo-venus-core-read-probe-v2",
   generatedAt: new Date().toISOString(),
   classification: "LIVE_READ_ONLY_PROTOCOL_PROBE",
   targetRole: account === "0x0000000000000000000000000000000000000000" ? "ZERO_ADDRESS_ABI_COHERENCE_TARGET" : "EXPLICIT_PUBLIC_ACCOUNT_TARGET",
@@ -16,6 +16,7 @@ const output = {
   account,
   rpcProviderId,
   state: undefined,
+  observations: [],
   invariants: undefined,
   errors: []
 };
@@ -38,10 +39,19 @@ try {
   const protocolContractsPresent = state.evidenceRefs.some((ref) => ref.includes("comptroller") && ref.includes("code:"))
     && state.evidenceRefs.some((ref) => ref.includes("resilient-oracle") && ref.includes("code:"));
   const listedMarketsPresent = state.listedMarketCount > 0;
-  const zeroTargetEmpty = account !== "0x0000000000000000000000000000000000000000"
-    || (state.activeMarkets.length === 0 && state.enteredMarkets.length === 0 && state.accountShortfall === 0n);
+
+  const zeroTargetNonBorrowing = account !== "0x0000000000000000000000000000000000000000"
+    || (state.enteredMarkets.length === 0
+      && state.accountShortfall === 0n
+      && state.activeMarkets.every((market) => BigInt(market.borrowBalance) === 0n));
+  const zeroAddressSeedBalancesObserved = account === "0x0000000000000000000000000000000000000000"
+    && state.activeMarkets.some((market) => BigInt(market.vTokenBalance) > 0n);
+  if (zeroAddressSeedBalancesObserved) {
+    output.observations.push("LIVE_OBSERVATION: Venus Core returns nonzero vToken balances for the zero address in multiple markets. These balances are preserved as protocol state and are not treated as user collateral because the zero address has entered no markets.");
+  }
+
   const passed = everyActiveMarketRelevant && allActiveSnapshotsClean && allActivePricesPositive
-    && nativeStatusConsistent && finalized && sameChain && protocolContractsPresent && listedMarketsPresent && zeroTargetEmpty;
+    && nativeStatusConsistent && finalized && sameChain && protocolContractsPresent && listedMarketsPresent && zeroTargetNonBorrowing;
 
   output.state = state;
   output.invariants = {
@@ -53,7 +63,8 @@ try {
     sameChain,
     protocolContractsPresent,
     listedMarketsPresent,
-    zeroTargetEmpty,
+    zeroTargetNonBorrowing,
+    zeroAddressSeedBalancesObserved,
     passed
   };
   output.status = passed ? "VENUS_CORE_READ_PROBE_PASS" : "VENUS_CORE_READ_PROBE_FAIL";
