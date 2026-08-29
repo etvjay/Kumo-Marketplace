@@ -2,6 +2,8 @@ import { z } from "zod";
 import { marketplaceCategorySchema } from "@kumo/shared";
 
 const scalarSchema = z.union([z.string(), z.number(), z.boolean(), z.null()]);
+const hexDataSchema = z.string().regex(/^0x[0-9a-fA-F]*$/);
+const evmAddressSchema = z.string().regex(/^0x[0-9a-fA-F]{40}$/);
 
 export const kernelModeSchema = z.enum(["recommend", "shadow", "execute"]);
 export const evidenceKindSchema = z.enum([
@@ -81,6 +83,53 @@ export const executableQuoteSchema = z.object({
   marketSnapshotRoot: z.string()
 });
 
+export const preparedCallKindSchema = z.enum([
+  "approval-reset",
+  "approval",
+  "protocol",
+  "swap",
+  "approval-revoke"
+]);
+
+export const preparedCallSchema = z.object({
+  order: z.number().int().nonnegative(),
+  kind: preparedCallKindSchema,
+  label: z.string(),
+  to: evmAddressSchema,
+  data: hexDataSchema,
+  value: z.string().regex(/^\d+$/),
+  asset: evmAddressSchema.optional(),
+  amount: z.string().regex(/^\d+$/).optional(),
+  spender: evmAddressSchema.optional()
+});
+
+export const preparedSpendBoundSchema = z.object({
+  asset: evmAddressSchema,
+  maxAmount: z.string().regex(/^\d+$/),
+  spender: evmAddressSchema,
+  purpose: z.string()
+});
+
+export const preparedActionSchema = z.object({
+  id: z.string(),
+  proposalId: z.string(),
+  quoteId: z.string().optional(),
+  executionChainId: z.number(),
+  signer: evmAddressSchema,
+  createdAt: z.string(),
+  expiresAt: z.string(),
+  marketSnapshotRoot: z.string(),
+  evidenceSnapshotRoot: z.string(),
+  executionCommitment: hexDataSchema,
+  atomic: z.boolean(),
+  signingStatus: z.literal("UNSIGNED"),
+  simulationStatus: z.enum(["NOT_RUN", "PASSED", "FAILED"]),
+  calls: z.array(preparedCallSchema).min(1),
+  spendBounds: z.array(preparedSpendBoundSchema).default([]),
+  evidenceRefs: z.array(z.string()).default([]),
+  limitations: z.array(z.string()).default([])
+});
+
 export const kernelRiskPolicySchema = z.object({
   maxObservationAgeSeconds: z.number().positive(),
   maxSlippageBps: z.number().nonnegative().optional(),
@@ -140,6 +189,9 @@ export type ObservationSnapshot = z.infer<typeof observationSnapshotSchema>;
 export type EvidencePacket = z.infer<typeof evidencePacketSchema>;
 export type StrategyProposal = z.infer<typeof strategyProposalSchema>;
 export type ExecutableQuote = z.infer<typeof executableQuoteSchema>;
+export type PreparedCall = z.infer<typeof preparedCallSchema>;
+export type PreparedSpendBound = z.infer<typeof preparedSpendBoundSchema>;
+export type PreparedAction = z.infer<typeof preparedActionSchema>;
 export type KernelRiskPolicy = z.infer<typeof kernelRiskPolicySchema>;
 export type ExecutionReadiness = z.infer<typeof executionReadinessSchema>;
 export type CanaryResult = z.infer<typeof canaryResultSchema>;

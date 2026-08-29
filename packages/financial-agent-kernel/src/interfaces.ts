@@ -7,6 +7,7 @@ import type {
   KernelMode,
   ObservationSnapshot,
   OutcomeRecord,
+  PreparedAction,
   StrategyProposal
 } from "./types.js";
 
@@ -54,6 +55,22 @@ export interface FinancialAgentStrategy {
     receipt: ExecutionReceipt;
     baselineRef?: string;
   }): Promise<OutcomeRecord>;
+}
+
+/**
+ * Converts an accepted strategy proposal and current executable quote into the
+ * exact bounded calls that may later be authorized. Preparation itself creates
+ * no authority and must never sign or broadcast transactions.
+ */
+export interface PreparedActionProvider {
+  readonly id: string;
+  prepare(input: {
+    context: StrategyRunContext;
+    observation: ObservationSnapshot;
+    evidence: EvidencePacket;
+    proposal: StrategyProposal;
+    quote?: ExecutableQuote | null;
+  }): Promise<PreparedAction>;
 }
 
 export interface RiskGateProvider {
