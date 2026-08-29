@@ -14,8 +14,8 @@
     "@kumo/financial-agent-kernel": "workspace:*",
     "@kumo/noema-agent-profile": "workspace:*",
     "@kumo/shared": "workspace:*",
-    "@pancakeswap/sdk": "^5.9.1",
-    "@pancakeswap/smart-router": "^7.7.0",
+    "@pancakeswap/sdk": "5.9.0",
+    "@pancakeswap/smart-router": "7.6.0",
     "viem": "2.37.13",
     "zod": "^3.24.2"
   },
