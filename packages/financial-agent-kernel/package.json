@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@kumo/shared": "workspace:*",
+    "viem": "^2.37.13",
     "zod": "^3.24.2"
   },
   "devDependencies": {

@@ -121,6 +121,8 @@ export const preparedActionSchema = z.object({
   marketSnapshotRoot: z.string(),
   evidenceSnapshotRoot: z.string(),
   executionCommitment: hexDataSchema,
+  authorizationCommitmentVersion: z.literal("kumo-prepared-action-authorization-v2"),
+  authorizationCommitment: hexDataSchema,
   atomic: z.boolean(),
   signingStatus: z.literal("UNSIGNED"),
   simulationStatus: z.enum(["NOT_RUN", "PASSED", "FAILED"]),
