@@ -1,0 +1,51 @@
+name: Rebalancer Prepared Action Fixture
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/financial-agent-kernel/**"
+      - "packages/reference-agents/src/rebalancer/pancakeswap-v3-transaction-preparer.ts"
+      - "packages/reference-agents/src/rebalancer/v3-math.ts"
+      - "packages/reference-agents/src/rebalancer/economics.ts"
+      - "scripts/rebalancer-prepared-action-fixture.mjs"
+      - ".github/workflows/rebalancer-prepared-action-fixture.yml"
+  workflow_dispatch:
+
+jobs:
+  fixture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Exercise deterministic unsigned PreparedAction fixture
+        env:
+          KUMO_EVIDENCE_PATH: evidence/fixtures/rebalancer-prepared-action.json
+        run: node scripts/rebalancer-prepared-action-fixture.mjs
+
+      - name: Upload fixture artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebalancer-prepared-action-fixture-${{ github.sha }}
+          path: evidence/fixtures/rebalancer-prepared-action.json
+          if-no-files-found: error
+          retention-days: 30
