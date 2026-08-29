@@ -6,9 +6,11 @@ on:
     paths:
       - "packages/financial-agent-kernel/**"
       - "packages/reference-agents/src/rebalancer/pancakeswap-v3-transaction-preparer.ts"
+      - "packages/reference-agents/src/rebalancer/market-drift.ts"
       - "packages/reference-agents/src/rebalancer/v3-math.ts"
       - "packages/reference-agents/src/rebalancer/economics.ts"
       - "scripts/rebalancer-prepared-action-fixture.mjs"
+      - "scripts/rebalancer-market-drift-fixture.mjs"
       - ".github/workflows/rebalancer-prepared-action-fixture.yml"
   workflow_dispatch:
 
@@ -40,6 +42,9 @@ jobs:
         env:
           KUMO_EVIDENCE_PATH: evidence/fixtures/rebalancer-prepared-action.json
         run: node scripts/rebalancer-prepared-action-fixture.mjs
+
+      - name: Verify semantic market drift fixture
+        run: node scripts/rebalancer-market-drift-fixture.mjs
 
       - name: Upload fixture artifact
         if: always()
