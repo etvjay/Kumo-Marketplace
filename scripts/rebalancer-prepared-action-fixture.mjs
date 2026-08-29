@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   applyPreparedActionSimulationReceipt,
+  computePreparedActionAuthorizationCommitment,
   preparedActionSchema,
   sealPreparedActionSimulationReceipt,
   validatePreparedActionForAuthorization
@@ -116,8 +117,13 @@ try {
   const mutation = (actionPatch, receipt = simulationReceipt) => validatePreparedActionForAuthorization({
     action: { ...simulated, ...actionPatch }, proposal, quote: kernelQuote, marketDrift: noDrift, simulationReceipt: receipt, now: "2026-08-29T05:00:01.000Z"
   });
+  const signerReboundBase = { ...simulated, signer: ALT_SIGNER };
+  const signerRebound = {
+    ...signerReboundBase,
+    authorizationCommitment: computePreparedActionAuthorizationCommitment(signerReboundBase)
+  };
   const mutations = {
-    signer: mutation({ signer: ALT_SIGNER }),
+    signerRebound: validatePreparedActionForAuthorization({ action: signerRebound, proposal, quote: kernelQuote, marketDrift: noDrift, simulationReceipt, now: "2026-08-29T05:00:01.000Z" }),
     chain: mutation({ executionChainId: 1 }),
     quoteId: mutation({ quoteId: "fixture-quote:tampered" }),
     spendBound: mutation({ spendBounds: simulated.spendBounds.map((bound, index) => index === 0 ? { ...bound, maxAmount: (BigInt(bound.maxAmount) + 1n).toString() } : bound) }),
@@ -140,7 +146,8 @@ try {
   const simulationReceiptRequired = !notSimulated.eligibleForAuthorization && notSimulated.reasons.includes("SIMULATION_RECEIPT_REQUIRED");
   const bareFlipRejected = !flippedWithoutReceipt.eligibleForAuthorization && flippedWithoutReceipt.reasons.includes("SIMULATION_RECEIPT_REQUIRED");
   const simulatedReady = ready.eligibleForAuthorization;
-  const signerMutationCaught = mutations.signer.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.signer.reasons.includes("SIMULATION_AUTHORIZATION_COMMITMENT_MISMATCH");
+  const signerRebindingCaught = mutations.signerRebound.commitmentValid
+    && mutations.signerRebound.reasons.includes("SIMULATION_AUTHORIZATION_COMMITMENT_MISMATCH");
   const chainMutationCaught = mutations.chain.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.chain.reasons.includes("QUOTE_CHAIN_MISMATCH") && mutations.chain.reasons.includes("SIMULATION_CHAIN_MISMATCH");
   const quoteMutationCaught = mutations.quoteId.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.quoteId.reasons.includes("QUOTE_ID_MISMATCH");
   const spendMutationCaught = mutations.spendBound.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.spendBound.reasons.some((reason) => reason.startsWith("SPEND_BOUND_APPROVAL_MISMATCH:"));
@@ -149,7 +156,7 @@ try {
 
   const passed = ordersContiguous && exactExecutionCommitmentReproducible && exactAuthorizationCommitmentReproducible
     && hasRemove && hasCollect && hasSwap && hasMint && hasExactApprovals && noAuthority && nonAtomicDeclared
-    && simulationReceiptRequired && bareFlipRejected && simulatedReady && signerMutationCaught && chainMutationCaught
+    && simulationReceiptRequired && bareFlipRejected && simulatedReady && signerRebindingCaught && chainMutationCaught
     && quoteMutationCaught && spendMutationCaught && driftCaught && simulationMutationCaught && quoteCalls === 2;
 
   output.composition = { targetTickLower: composition.targetTickLower, targetTickUpper: composition.targetTickUpper, swapDirection: composition.swapDirection, swapAmountInRaw: composition.swapAmountInRaw };
@@ -157,7 +164,7 @@ try {
   output.simulationReceipt = simulationReceipt;
   output.authorizationValidation = { notSimulated, flippedWithoutReceipt, simulatedReady: ready };
   output.mutationResults = mutations;
-  output.invariants = { ordersContiguous, exactExecutionCommitmentReproducible, exactAuthorizationCommitmentReproducible, hasRemove, hasCollect, hasSwap, hasMint, hasExactApprovals, noAuthority, nonAtomicDeclared, simulationReceiptRequired, bareFlipRejected, simulatedReady, signerMutationCaught, chainMutationCaught, quoteMutationCaught, spendMutationCaught, driftCaught, simulationMutationCaught, quoteCalls, passed };
+  output.invariants = { ordersContiguous, exactExecutionCommitmentReproducible, exactAuthorizationCommitmentReproducible, hasRemove, hasCollect, hasSwap, hasMint, hasExactApprovals, noAuthority, nonAtomicDeclared, simulationReceiptRequired, bareFlipRejected, simulatedReady, signerRebindingCaught, chainMutationCaught, quoteMutationCaught, spendMutationCaught, driftCaught, simulationMutationCaught, quoteCalls, passed };
   output.status = passed ? "PREPARED_ACTION_AUTHORIZATION_FIXTURE_PASS" : "PREPARED_ACTION_AUTHORIZATION_FIXTURE_FAIL";
   if (!passed) process.exitCode = 1;
 } catch (error) {
