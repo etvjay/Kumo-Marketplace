@@ -3,8 +3,14 @@ export const PANCAKESWAP_V3_BSC = {
   factory: "0x0BFbCF9fa4f9C56B0F40a671Ad40E0805A091865",
   nonfungiblePositionManager: "0x46A15B0b27311cedF172AB29E4f4766fbE7F4364",
 
-  // Compatibility only. Do not select this legacy router for new execution
-  // merely because older Kumo code referenced it.
+  // Direct Pancake V3 periphery. These are the deterministic surfaces used by
+  // the Rebalancer when it needs one exact, already-verified V3 pool rather
+  // than multi-venue route discovery.
+  swapRouterV3: "0x1b81D678ffb9C0263b24A97847620C99d213eB14",
+  quoterV2: "0xB048Bbc1Ee6b733FFfCFb9e9CeF7375518e25997",
+
+  // Compatibility only. Do not select this legacy mixed smart router for new
+  // execution merely because older Kumo code referenced it.
   legacySmartRouter: "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",
   smartRouter: "0x13f4EA83D0bd40E75C8222255bc855a974568Dd4",
 
