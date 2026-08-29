@@ -6,7 +6,8 @@
   "scripts": {
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
-    "test": "pnpm -r test --if-present"
+    "test": "pnpm -r test --if-present",
+    "altana:wallet-preflight": "node scripts/altana-wallet-preflight.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild"]

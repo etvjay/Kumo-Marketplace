@@ -69,6 +69,10 @@ export class AltanaSdkSessionRuntime implements AltanaGrantSessionPort {
     this.adminSigner = signerFromPrivateKey(options.adminPrivateKey);
   }
 
+  get executionChainId(): number {
+    return this.chainId;
+  }
+
   private async wallet(): Promise<Wallet & { signer: ReturnType<typeof signerFromPrivateKey> }> {
     if (!this.walletPromise) {
       this.walletPromise = this.client.createWallet({ signer: this.adminSigner }) as Promise<Wallet & { signer: ReturnType<typeof signerFromPrivateKey> }>;
@@ -79,6 +83,15 @@ export class AltanaSdkSessionRuntime implements AltanaGrantSessionPort {
       throw new Error("ALTANA_RUNTIME_WALLET_ADDRESS_MISMATCH");
     }
     return wallet;
+  }
+
+  /**
+   * Resolve the wallet address without exposing either the admin signer or a
+   * session signer. Altana createWallet is counterfactual registration; this
+   * method is identification/preflight, not proof of an on-chain grant.
+   */
+  async getWalletAddress(): Promise<Address> {
+    return (await this.wallet()).address;
   }
 
   async grantSession(input: {
