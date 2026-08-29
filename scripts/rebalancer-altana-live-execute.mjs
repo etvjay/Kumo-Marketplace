@@ -1,7 +1,12 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
-  applyPreparedActionSimulationReceipt
+  applyPreparedActionSimulationReceipt,
+  executableQuoteSchema,
+  observationSnapshotSchema,
+  preparedActionSchema,
+  preparedActionSimulationReceiptSchema,
+  strategyProposalSchema
 } from "../packages/financial-agent-kernel/dist/index.js";
 import {
   AltanaSdkSessionRuntime,
@@ -31,19 +36,48 @@ function safeError(error) {
   return message.split(privateKey).join("[REDACTED]");
 }
 
-const authorizationPackage = JSON.parse(await fs.readFile(packagePath, "utf8"));
-const simulationArtifact = JSON.parse(await fs.readFile(simulationPath, "utf8"));
-const baseAction = authorizationPackage.preparedAction ?? authorizationPackage.action;
-const proposal = authorizationPackage.proposal;
-const quote = authorizationPackage.quote;
-const previousObservation = authorizationPackage.previousObservation ?? authorizationPackage.observation;
-const simulationReceipt = simulationArtifact.simulationReceipt ?? authorizationPackage.simulationReceipt;
-if (!baseAction || !proposal || !quote || !previousObservation || !simulationReceipt) {
+function parseJsonArtifact(raw, label) {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    throw new Error(`${label}_JSON_INVALID`);
+  }
+}
+
+const authorizationPackage = parseJsonArtifact(await fs.readFile(packagePath, "utf8"), "AUTHORIZATION_PACKAGE");
+const simulationArtifact = parseJsonArtifact(await fs.readFile(simulationPath, "utf8"), "SIMULATION_ARTIFACT");
+
+const actionCandidate = authorizationPackage.preparedAction ?? authorizationPackage.action;
+const proposalCandidate = authorizationPackage.proposal;
+const quoteCandidate = authorizationPackage.quote;
+const previousObservationCandidate = authorizationPackage.previousObservation ?? authorizationPackage.observation;
+const simulationCandidate = simulationArtifact.simulationReceipt ?? authorizationPackage.simulationReceipt;
+if (!actionCandidate || !proposalCandidate || !quoteCandidate || !previousObservationCandidate || !simulationCandidate) {
   throw new Error("AUTHORIZATION_PACKAGE_REQUIRES_ACTION_PROPOSAL_QUOTE_PREVIOUS_OBSERVATION_AND_SIMULATION_RECEIPT");
 }
+
+const baseAction = preparedActionSchema.parse(actionCandidate);
+const proposal = strategyProposalSchema.parse(proposalCandidate);
+const quote = executableQuoteSchema.parse(quoteCandidate);
+const previousObservation = observationSnapshotSchema.parse(previousObservationCandidate);
+const simulationReceipt = preparedActionSimulationReceiptSchema.parse(simulationCandidate);
+
 if (!baseAction.quoteId) throw new Error("LIVE_EXECUTION_REQUIRES_BOUND_EXECUTABLE_QUOTE_ID");
 if (quote.id !== baseAction.quoteId) throw new Error("LIVE_EXECUTION_QUOTE_ID_MISMATCH");
+if (quote.proposalId !== proposal.id || baseAction.proposalId !== proposal.id) throw new Error("LIVE_EXECUTION_PROPOSAL_LINEAGE_MISMATCH");
+if (quote.chainId !== baseAction.executionChainId) throw new Error("LIVE_EXECUTION_QUOTE_CHAIN_MISMATCH");
+if (quote.marketSnapshotRoot !== proposal.marketSnapshotRoot || baseAction.marketSnapshotRoot !== proposal.marketSnapshotRoot) {
+  throw new Error("LIVE_EXECUTION_MARKET_ROOT_LINEAGE_MISMATCH");
+}
+if (baseAction.evidenceSnapshotRoot !== proposal.evidenceSnapshotRoot) throw new Error("LIVE_EXECUTION_EVIDENCE_ROOT_LINEAGE_MISMATCH");
+if (previousObservation.marketSnapshotRoot !== proposal.marketSnapshotRoot) throw new Error("LIVE_EXECUTION_PRIOR_OBSERVATION_ROOT_MISMATCH");
+if (previousObservation.agentId !== proposal.agentId || previousObservation.category !== proposal.category) {
+  throw new Error("LIVE_EXECUTION_PRIOR_OBSERVATION_IDENTITY_MISMATCH");
+}
 if (proposal.disposition !== "propose") throw new Error("LIVE_EXECUTION_REQUIRES_STRATEGY_PROPOSAL");
+if (baseAction.executionChainId !== 56 || quote.chainId !== 56 || previousObservation.chainId !== 56) {
+  throw new Error("LIVE_EXECUTION_REQUIRES_BSC_MAINNET_LINEAGE");
+}
 
 const action = applyPreparedActionSimulationReceipt(baseAction, simulationReceipt);
 const runtime = new AltanaSdkSessionRuntime({ adminPrivateKey: privateKey, network: "mainnet" });
@@ -56,14 +90,17 @@ const priceProvider = new ChainlinkBscUsdPriceProvider({ rpcUrl, rpcProviderId }
 const marketDataProvider = new GeckoTerminalBscMarketDataProvider();
 const tokenId = authorizationPackage.positionId ?? previousObservation.values?.positionId;
 if (typeof tokenId !== "string" || tokenId.length === 0) throw new Error("LIVE_EXECUTION_POSITION_ID_REQUIRED");
+if (previousObservation.values?.positionId !== tokenId) throw new Error("LIVE_EXECUTION_POSITION_ID_LINEAGE_MISMATCH");
 
 const output = {
-  schemaVersion: "kumo-rebalancer-altana-live-execution-v1",
+  schemaVersion: "kumo-rebalancer-altana-live-execution-v2",
   generatedAt: new Date().toISOString(),
   classification: "LIVE_EXECUTION_ATTEMPT",
   status: "STARTED",
   walletAddress,
   positionId: tokenId,
+  proposalId: proposal.id,
+  quoteId: quote.id,
   authorizationCommitment: action.authorizationCommitment,
   simulationReceiptCommitment: simulationReceipt.receiptCommitment,
   refresh: undefined,
