@@ -10,8 +10,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@altananetwork/sdk": "0.8.0",
     "@kumo/financial-agent-kernel": "workspace:*",
-    "@kumo/shared": "workspace:*"
+    "@kumo/shared": "workspace:*",
+    "viem": "^2.37.13"
   },
   "devDependencies": {
     "typescript": "^5.8.2"
