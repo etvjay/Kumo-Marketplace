@@ -82,17 +82,22 @@ export class V3RangeFeeOpportunityModel implements RebalancerFeeModel {
 }
 
 /**
- * Conservative v1 risk delta. It prices two incremental risks from changing
- * the LP: center displacement and any increase in range concentration. It is
+ * Bounded concentration-risk proxy for a proposed V3 range change.
+ *
+ * v2 fixes a pathology in v1: comparing a full-range/very-wide LP directly to
+ * a narrow target made the linear width ratio explode, allowing the one-horizon
+ * risk delta to exceed the entire position value. v2 log-compresses the width
+ * ratio and caps the modeled horizon loss fraction. It remains an inference,
  * not an exact impermanent-loss calculator.
  */
 export class V3ConcentrationRiskModel implements RebalancerRiskModel {
-  readonly id = "kumo-v3-concentration-risk-v1";
+  readonly id = "kumo-v3-concentration-risk-v2";
 
   constructor(
     private readonly horizonHours = 24,
     private readonly centerMoveWeight = 0.2,
-    private readonly concentrationWeight = 0.1
+    private readonly concentrationWeight = 0.1,
+    private readonly maxHorizonRiskFraction = 0.25
   ) {}
 
   async estimateImpermanentLossDeltaUsd(input: {
@@ -101,22 +106,36 @@ export class V3ConcentrationRiskModel implements RebalancerRiskModel {
     targetTickLower: number;
     targetTickUpper: number;
   }): Promise<number> {
+    const valueUsd = Math.max(0, input.position.valueUsd);
+    if (valueUsd === 0) return 0;
+
     const volatility = input.market.realizedVolatilityAnnualized;
-    if (volatility === undefined) return input.position.valueUsd * 0.0025;
+    if (volatility === undefined) return valueUsd * 0.0025;
 
     const currentCenter = (input.position.tickLower + input.position.tickUpper) / 2;
     const targetCenter = (input.targetTickLower + input.targetTickUpper) / 2;
     const currentWidth = Math.max(1, input.position.tickUpper - input.position.tickLower);
     const targetWidth = Math.max(1, input.targetTickUpper - input.targetTickLower);
-    const centerMoveRatio = Math.min(1, Math.abs(targetCenter - currentCenter) / Math.max(1, targetWidth / 2));
-    const concentrationIncrease = Math.max(0, currentWidth / targetWidth - 1);
-    const horizonSigma = Math.max(0, volatility) * Math.sqrt(this.horizonHours / HOURS_PER_YEAR);
-    const riskRate = horizonSigma * (
-      this.centerMoveWeight * centerMoveRatio
-      + this.concentrationWeight * concentrationIncrease
+    const centerMoveRatio = Math.min(
+      1,
+      Math.abs(targetCenter - currentCenter) / Math.max(1, targetWidth / 2)
     );
 
-    return Math.max(0, input.position.valueUsd * riskRate);
+    // A 2x narrowing and a 2000x narrowing are materially different, but the
+    // latter must not be treated as 1000 times more dangerous. Log compression
+    // keeps the signal monotonic without allowing full-range legacy positions
+    // to dominate every other economic term by construction.
+    const widthRatio = Math.max(1, currentWidth / targetWidth);
+    const concentrationIncreaseLog = Math.log(widthRatio);
+    const horizonSigma = Math.max(0, volatility) * Math.sqrt(this.horizonHours / HOURS_PER_YEAR);
+    const uncappedRiskRate = horizonSigma * (
+      this.centerMoveWeight * centerMoveRatio
+      + this.concentrationWeight * concentrationIncreaseLog
+    );
+    const cap = Math.max(0, Math.min(1, this.maxHorizonRiskFraction));
+    const boundedRiskRate = Math.max(0, Math.min(cap, uncappedRiskRate));
+
+    return valueUsd * boundedRiskRate;
   }
 }
 
