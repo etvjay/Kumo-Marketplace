@@ -1,13 +1,35 @@
+import { z } from "zod";
 import { keccak256, toHex, type Hex } from "viem";
 import type { PreparedAction } from "./types.js";
 
-export interface PreparedActionSimulationCallResult {
-  order: number;
-  passed: boolean;
-  transactionHash?: string;
-  gasUsed?: string;
-  failureReason?: string;
-}
+const hexDataSchema = z.string().regex(/^0x[0-9a-fA-F]*$/);
+
+export const preparedActionSimulationCallResultSchema = z.object({
+  order: z.number().int().nonnegative(),
+  passed: z.boolean(),
+  transactionHash: hexDataSchema.optional(),
+  gasUsed: z.string().regex(/^\d+$/).optional(),
+  failureReason: z.string().optional()
+});
+
+export const preparedActionSimulationReceiptSchema = z.object({
+  schemaVersion: z.literal("kumo-prepared-action-simulation-v1"),
+  id: z.string().min(1),
+  actionId: z.string().min(1),
+  authorizationCommitment: hexDataSchema,
+  executionChainId: z.number().int().positive(),
+  simulationKind: z.enum(["STATEFUL_FORK", "STRUCTURAL_FIXTURE"]),
+  engine: z.string().min(1),
+  simulatedAt: z.string().min(1),
+  forkBlockNumber: z.string().regex(/^\d+$/),
+  forkBlockHash: hexDataSchema.optional(),
+  passed: z.boolean(),
+  callResults: z.array(preparedActionSimulationCallResultSchema),
+  evidenceRefs: z.array(z.string()),
+  receiptCommitment: hexDataSchema
+});
+
+export type PreparedActionSimulationCallResult = z.infer<typeof preparedActionSimulationCallResultSchema>;
 
 export interface PreparedActionSimulationReceiptMaterial {
   schemaVersion: "kumo-prepared-action-simulation-v1";
@@ -25,9 +47,7 @@ export interface PreparedActionSimulationReceiptMaterial {
   evidenceRefs: string[];
 }
 
-export interface PreparedActionSimulationReceipt extends PreparedActionSimulationReceiptMaterial {
-  receiptCommitment: Hex;
-}
+export type PreparedActionSimulationReceipt = z.infer<typeof preparedActionSimulationReceiptSchema>;
 
 function canonicalCallResult(result: PreparedActionSimulationCallResult) {
   return {
@@ -62,10 +82,10 @@ export function computePreparedActionSimulationReceiptCommitment(
 export function sealPreparedActionSimulationReceipt(
   input: PreparedActionSimulationReceiptMaterial
 ): PreparedActionSimulationReceipt {
-  return {
+  return preparedActionSimulationReceiptSchema.parse({
     ...input,
     receiptCommitment: computePreparedActionSimulationReceiptCommitment(input)
-  };
+  });
 }
 
 export interface SimulationReceiptBindingValidation {
@@ -79,6 +99,15 @@ export function validatePreparedActionSimulationReceipt(
   receipt: PreparedActionSimulationReceipt
 ): SimulationReceiptBindingValidation {
   const reasons: string[] = [];
+  const parsed = preparedActionSimulationReceiptSchema.safeParse(receipt);
+  if (!parsed.success) {
+    return {
+      valid: false,
+      reasons: ["SIMULATION_RECEIPT_SCHEMA_INVALID"],
+      recomputedReceiptCommitment: "0x" as Hex
+    };
+  }
+
   const recomputedReceiptCommitment = computePreparedActionSimulationReceiptCommitment(receipt);
   if (recomputedReceiptCommitment.toLowerCase() !== receipt.receiptCommitment.toLowerCase()) {
     reasons.push("SIMULATION_RECEIPT_COMMITMENT_MISMATCH");
