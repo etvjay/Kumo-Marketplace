@@ -12,11 +12,11 @@ on:
       account:
         description: "Public Venus Core account to verify"
         required: false
-        default: "0x82963BA5d53afC1aC107D1f98494734A34C73A17"
+        default: "0xcD5e600c3335524bb6572a0Ebd639aA5ea4EfF0F"
       discovery_ref:
         description: "Public discovery evidence reference"
         required: false
-        default: "bscscan:tx:0xb7dbb2b04c1def83b06b4c11abb1bb09715422da575e5c3b6f47c0ec20c655af"
+        default: "bscscan:tx:0x94f3eae78f1f0b2c00bdf5ae05d41982fb77327cf32351a84f7394486a4d0b51"
 
 jobs:
   evidence:
@@ -40,8 +40,8 @@ jobs:
       - name: Verify public Venus Core borrower against finalized BSC state
         env:
           BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
-          VENUS_EVIDENCE_ACCOUNT: ${{ inputs.account || '0x82963BA5d53afC1aC107D1f98494734A34C73A17' }}
-          VENUS_ACCOUNT_DISCOVERY_REF: ${{ inputs.discovery_ref || 'bscscan:tx:0xb7dbb2b04c1def83b06b4c11abb1bb09715422da575e5c3b6f47c0ec20c655af' }}
+          VENUS_EVIDENCE_ACCOUNT: ${{ inputs.account || '0xcD5e600c3335524bb6572a0Ebd639aA5ea4EfF0F' }}
+          VENUS_ACCOUNT_DISCOVERY_REF: ${{ inputs.discovery_ref || 'bscscan:tx:0x94f3eae78f1f0b2c00bdf5ae05d41982fb77327cf32351a84f7394486a4d0b51' }}
           KUMO_EVIDENCE_PATH: evidence/live/venus-core-account-evidence.json
         run: node scripts/venus-core-account-evidence.mjs
       - name: Upload public account evidence
