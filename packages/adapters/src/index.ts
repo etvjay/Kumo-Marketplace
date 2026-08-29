@@ -4,3 +4,4 @@ export * from "./http-liveness.js";
 export * from "./altana-authority.js";
 export * from "./altana-runtime.js";
 export * from "./anvil-stateful-canary.js";
+export * from "./live-authorization-package.js";
