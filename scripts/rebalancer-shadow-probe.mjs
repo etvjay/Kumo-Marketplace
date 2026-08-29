@@ -45,7 +45,7 @@ const json = (value) => JSON.stringify(
 );
 
 const output = {
-  schemaVersion: "kumo-rebalancer-live-shadow-v1",
+  schemaVersion: "kumo-rebalancer-live-shadow-v2",
   generatedAt: new Date().toISOString(),
   mode: "SHADOW_READ_ONLY",
   rpcProvider: new URL(rpcUrl).hostname,
@@ -55,6 +55,7 @@ const output = {
   status: "STARTED",
   discovery: undefined,
   poolDiscovery: [],
+  assessments: [],
   selectedCandidate: undefined,
   preparation: undefined,
   shadowAssessment: undefined,
@@ -64,6 +65,28 @@ const output = {
 async function persist() {
   await fs.mkdir(path.dirname(outputPath), { recursive: true });
   await fs.writeFile(outputPath, `${json(output)}\n`, "utf8");
+}
+
+function selectedCandidate(candidate, prepared) {
+  return {
+    tokenId: candidate.tokenId,
+    candidateSource: candidate.source,
+    owner: prepared.snapshot.owner,
+    pool: prepared.snapshot.pool,
+    token0: prepared.snapshot.token0,
+    token1: prepared.snapshot.token1,
+    fee: prepared.snapshot.fee
+  };
+}
+
+function preparationSummary(prepared) {
+  return {
+    blockNumber: prepared.snapshot.blockNumber,
+    blockHash: prepared.snapshot.blockHash,
+    valuation: prepared.valuation,
+    baseline: prepared.baseline,
+    evidenceRefs: prepared.evidenceRefs
+  };
 }
 
 try {
@@ -92,7 +115,8 @@ try {
   }
 
   // Primary discovery is venue-scoped. This avoids querying the global NPM
-  // Transfer firehose, which the public BSC RPC can reject even for one busy block.
+  // Transfer firehose and keeps candidate supply relevant to the market the
+  // strategy can actually understand and price.
   for (const pool of preferredPools) {
     try {
       const result = await discoverRecentPancakeV3PositionsForPool({
@@ -154,6 +178,8 @@ try {
     }
   }
 
+  let firstHold;
+
   for (const candidate of candidateIds) {
     const prepared = await preparePancakeV3LivePosition({
       tokenId: candidate.tokenId,
@@ -188,27 +214,39 @@ try {
         policy,
         horizonHours: 24
       });
-      output.selectedCandidate = {
+
+      output.assessments.push({
         tokenId: candidate.tokenId,
-        candidateSource: candidate.source,
-        owner: prepared.snapshot.owner,
+        source: candidate.source,
         pool: prepared.snapshot.pool,
-        token0: prepared.snapshot.token0,
-        token1: prepared.snapshot.token1,
-        fee: prepared.snapshot.fee
-      };
-      output.preparation = {
         blockNumber: prepared.snapshot.blockNumber,
-        blockHash: prepared.snapshot.blockHash,
-        valuation: prepared.valuation,
-        baseline: prepared.baseline,
-        evidenceRefs: prepared.evidenceRefs
+        positionValueUsd: prepared.valuation.markedValueIncludingCrystallizedFeesUsd,
+        currentTick: prepared.snapshot.currentTick,
+        tickLower: prepared.snapshot.tickLower,
+        tickUpper: prepared.snapshot.tickUpper,
+        noemaDecision: shadow.noema.evaluation.decision,
+        disposition: shadow.proposal.disposition,
+        action: shadow.proposal.action,
+        expectedNetBenefitUsd: shadow.proposal.expectedNetBenefit,
+        estimatedCostUsd: shadow.proposal.estimatedCost,
+        refusalReasons: shadow.proposal.refusalReasons
+      });
+
+      const result = {
+        candidate,
+        prepared,
+        shadow
       };
-      output.shadowAssessment = shadow;
-      output.status = shadow.proposal.disposition === "propose"
-        ? "LIVE_SHADOW_REBALANCE_PROPOSED"
-        : "LIVE_SHADOW_HOLD";
-      break;
+
+      if (shadow.proposal.disposition === "propose") {
+        output.selectedCandidate = selectedCandidate(candidate, prepared);
+        output.preparation = preparationSummary(prepared);
+        output.shadowAssessment = shadow;
+        output.status = "LIVE_SHADOW_REBALANCE_PROPOSED";
+        break;
+      }
+
+      if (!firstHold) firstHold = result;
     } catch (error) {
       output.rejections.push({
         tokenId: candidate.tokenId,
@@ -217,6 +255,13 @@ try {
         reason: error instanceof Error ? error.message : String(error)
       });
     }
+  }
+
+  if (!output.shadowAssessment && firstHold) {
+    output.selectedCandidate = selectedCandidate(firstHold.candidate, firstHold.prepared);
+    output.preparation = preparationSummary(firstHold.prepared);
+    output.shadowAssessment = firstHold.shadow;
+    output.status = "LIVE_SHADOW_HOLD_NO_ACTIONABLE_CANDIDATE";
   }
 
   if (!output.shadowAssessment) {
