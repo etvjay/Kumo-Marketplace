@@ -35,13 +35,17 @@ jobs:
       - name: Build workspace
         run: pnpm build
 
-      - name: Assess a live Pancake V3 position in shadow mode
+      - name: Assess live Pancake V3 positions across price-supported pools
         env:
           # Official BNB public mainnet endpoints disable eth_getLogs. This
-          # workflow needs logs only for discovery; all selected positions are
-          # subsequently re-read and block-bound on finalized BSC state.
+          # workflow needs logs only for discovery; every candidate is then
+          # re-read, factory-resolved and block-bound before it becomes evidence.
           BSC_RPC_URL: https://bsc-rpc.publicnode.com
           KUMO_PANCAKE_SCAN_LIMIT: "64"
+          # Locator hints only. The scanner does not trust these labels: live
+          # position state + Pancake factory identity determine the actual pool.
+          # USDT/WBNB 0.01%, USDC/WBNB 0.01%, USDT/USDC 0.01%.
+          KUMO_PREFERRED_POOL_ADDRESSES: "0x172fcD41E0913e95784454622d1c3724f546f849,0xf2688fb5b81049dfb7703ada5e770543770612c4,0x92b7807bf19b7dddf89b706143896d05228f3121"
           KUMO_EVIDENCE_PATH: evidence/live/rebalancer-shadow-probe.json
         run: node scripts/rebalancer-shadow-probe.mjs
 
