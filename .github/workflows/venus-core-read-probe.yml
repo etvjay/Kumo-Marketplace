@@ -1,0 +1,50 @@
+name: Venus Core Read Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/health/**"
+      - "scripts/venus-core-read-probe.mjs"
+      - ".github/workflows/venus-core-read-probe.yml"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Read Venus Core at one finalized BSC block
+        env:
+          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          VENUS_PROBE_ACCOUNT: "0x0000000000000000000000000000000000000000"
+          KUMO_EVIDENCE_PATH: evidence/live/venus-core-read-probe.json
+        run: node scripts/venus-core-read-probe.mjs
+
+      - name: Upload read-only protocol evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-core-read-probe-${{ github.sha }}
+          path: evidence/live/venus-core-read-probe.json
+          if-no-files-found: error
+          retention-days: 30
