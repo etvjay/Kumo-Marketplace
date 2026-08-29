@@ -73,6 +73,30 @@ export interface PreparedActionProvider {
   }): Promise<PreparedAction>;
 }
 
+export interface MarketDriftResult {
+  drifted: boolean;
+  reasons: string[];
+  evidenceRefs?: string[];
+}
+
+/**
+ * Domain-specific semantic drift comparator.
+ *
+ * Snapshot roots remain exact provenance identifiers. This provider answers a
+ * different question: whether a later observation is still economically close
+ * enough to the state on which a consequential action was proposed/quoted.
+ */
+export interface MarketDriftProvider {
+  readonly id: string;
+  compare(input: {
+    context: StrategyRunContext;
+    proposal: StrategyProposal;
+    quote: ExecutableQuote | null;
+    previousObservation: ObservationSnapshot;
+    refreshedObservation: ObservationSnapshot;
+  }): Promise<MarketDriftResult>;
+}
+
 export interface RiskGateProvider {
   readonly id: string;
   evaluate(input: {

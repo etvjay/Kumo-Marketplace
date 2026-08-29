@@ -41,7 +41,7 @@ export interface RebalancerLiveShadowAssessment {
     grossPoolFeeAprEstimate: number;
     volatilityModel: "hourly-log-return-sample-vol-v1";
     feeModel: "kumo-v3-range-fee-opportunity-v1";
-    riskModel: "kumo-v3-concentration-risk-v1";
+    riskModel: "kumo-v3-concentration-risk-v2";
     horizonHours: number;
   };
   domainPosition: RebalancerPosition;
@@ -94,8 +94,6 @@ export async function assessPancakeV3LiveShadow(input: {
     amount0: input.prepared.valuation.principalAmount0,
     amount1: input.prepared.valuation.principalAmount1,
     valueUsd: input.prepared.valuation.markedValueIncludingCrystallizedFeesUsd,
-    // Current schema name is retained for compatibility. For this live adapter,
-    // the value is only the directly evidenced crystallized fee floor.
     uncollectedFeesUsd: input.prepared.valuation.crystallizedFeesFloorUsd,
     inRange: input.prepared.valuation.priceRegion === "IN_RANGE",
     observedAt: input.prepared.snapshot.observedAt,
@@ -167,7 +165,7 @@ export async function assessPancakeV3LiveShadow(input: {
       grossPoolFeeAprEstimate,
       volatilityModel: "hourly-log-return-sample-vol-v1",
       feeModel: "kumo-v3-range-fee-opportunity-v1",
-      riskModel: "kumo-v3-concentration-risk-v1",
+      riskModel: "kumo-v3-concentration-risk-v2",
       horizonHours
     },
     domainPosition: position,
@@ -186,7 +184,7 @@ export async function assessPancakeV3LiveShadow(input: {
       "GeckoTerminal reserve and volume are sourced market data fetched after the finalized chain snapshot; they are not block-bound protocol state.",
       "Gross pool fee APR is volume × fee-tier annualized over pool reserve; it is not realized position APR.",
       "Fee opportunity uses a terminal in-range probability proxy over sourced realized volatility; it is an inference, not a forecast guarantee.",
-      "The concentration-risk model is a conservative heuristic, not an exact impermanent-loss calculator.",
+      "The concentration-risk model is a bounded conservative heuristic, not an exact impermanent-loss calculator.",
       "No executable PancakeSwap remove/collect/swap/mint quote is produced in this shadow assessment.",
       "The field uncollectedFeesUsd currently carries only the directly evidenced crystallized tokensOwed fee floor for compatibility with the existing domain schema."
     ]

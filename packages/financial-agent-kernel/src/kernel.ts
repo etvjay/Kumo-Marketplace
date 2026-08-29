@@ -2,6 +2,8 @@ import type {
   CanaryProvider,
   FinancialAgentStrategy,
   FinancialExecutionProvider,
+  MarketDriftProvider,
+  MarketDriftResult,
   RiskGateProvider,
   StrategyRunContext
 } from "./interfaces.js";
@@ -25,6 +27,7 @@ export interface KernelRunResult {
   proposal: StrategyProposal;
   quote: ExecutableQuote | null;
   refreshedObservation: ObservationSnapshot;
+  marketDrift?: MarketDriftResult;
   securityVetoes: string[];
   policyVetoes: string[];
   canary?: CanaryResult;
@@ -35,6 +38,7 @@ export interface KernelRunResult {
 export interface FinancialAgentKernelOptions {
   strategy: FinancialAgentStrategy;
   policy: KernelRiskPolicy;
+  marketDrift?: MarketDriftProvider;
   securityGate?: RiskGateProvider;
   policyGate?: RiskGateProvider;
   canary?: CanaryProvider;
@@ -54,15 +58,9 @@ export class FinancialAgentKernel {
     const evidence = await this.options.strategy.investigate({ context, observation });
     const proposal = await this.options.strategy.propose({ context, observation, evidence });
 
-    if (proposal.agentId !== context.agentId) {
-      throw new Error("STRATEGY_AGENT_MISMATCH");
-    }
-    if (proposal.category !== this.options.strategy.category) {
-      throw new Error("STRATEGY_CATEGORY_MISMATCH");
-    }
-    if (proposal.mode !== context.mode) {
-      throw new Error("STRATEGY_MODE_MISMATCH");
-    }
+    if (proposal.agentId !== context.agentId) throw new Error("STRATEGY_AGENT_MISMATCH");
+    if (proposal.category !== this.options.strategy.category) throw new Error("STRATEGY_CATEGORY_MISMATCH");
+    if (proposal.mode !== context.mode) throw new Error("STRATEGY_MODE_MISMATCH");
     if (proposal.evidencePacketRef !== evidence.id || proposal.evidenceSnapshotRoot !== evidence.evidenceRoot) {
       throw new Error("STRATEGY_EVIDENCE_MISMATCH");
     }
@@ -71,15 +69,23 @@ export class FinancialAgentKernel {
       ? await this.options.strategy.quote({ context, observation, evidence, proposal })
       : null;
 
-    if (quote && quote.proposalId !== proposal.id) {
-      throw new Error("QUOTE_PROPOSAL_MISMATCH");
-    }
+    if (quote && quote.proposalId !== proposal.id) throw new Error("QUOTE_PROPOSAL_MISMATCH");
 
     const refreshedObservation = await this.options.strategy.refresh({
       context,
       proposal,
       previousObservation: observation
     });
+
+    const marketDrift = this.options.marketDrift
+      ? await this.options.marketDrift.compare({
+          context,
+          proposal,
+          quote,
+          previousObservation: observation,
+          refreshedObservation
+        })
+      : undefined;
 
     const securityResult = this.options.securityGate
       ? await this.options.securityGate.evaluate({
@@ -118,6 +124,7 @@ export class FinancialAgentKernel {
       quote,
       refreshedObservation,
       policy: this.options.policy,
+      marketDrift,
       securityVetoes: securityResult.vetoes,
       policyVetoes: policyResult.vetoes,
       authorityRef: context.authorityRef,
@@ -146,6 +153,7 @@ export class FinancialAgentKernel {
       proposal,
       quote,
       refreshedObservation,
+      marketDrift,
       securityVetoes: securityResult.vetoes,
       policyVetoes: policyResult.vetoes,
       canary,

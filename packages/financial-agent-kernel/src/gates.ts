@@ -1,3 +1,4 @@
+import type { MarketDriftResult } from "./interfaces.js";
 import type {
   CanaryResult,
   ExecutableQuote,
@@ -13,6 +14,7 @@ export interface ReadinessInput {
   quote: ExecutableQuote | null;
   refreshedObservation: ObservationSnapshot;
   policy: KernelRiskPolicy;
+  marketDrift?: MarketDriftResult;
   securityVetoes?: string[];
   policyVetoes?: string[];
   authorityRef?: string;
@@ -50,7 +52,14 @@ export function evaluateExecutionReadiness(input: ReadinessInput): ExecutionRead
     reasons.push("OBSERVATION_STALE");
   }
 
-  if (input.refreshedObservation.marketSnapshotRoot !== input.proposal.marketSnapshotRoot) {
+  if (input.marketDrift) {
+    if (input.marketDrift.drifted) {
+      state = "stale";
+      for (const reason of input.marketDrift.reasons) reasons.push(`MARKET_DRIFT:${reason}`);
+    }
+  } else if (input.refreshedObservation.marketSnapshotRoot !== input.proposal.marketSnapshotRoot) {
+    // Backward-compatible fallback for strategies that have not yet defined
+    // domain-specific semantic drift. Exact roots are intentionally strict.
     state = "stale";
     reasons.push("MARKET_DRIFT");
   }
@@ -68,7 +77,11 @@ export function evaluateExecutionReadiness(input: ReadinessInput): ExecutionRead
       state = "stale";
       reasons.push("QUOTE_EXPIRED");
     }
-    if (input.quote.marketSnapshotRoot !== input.refreshedObservation.marketSnapshotRoot) {
+    // With a MarketDriftProvider, proposal/quote/refreshed semantic equivalence
+    // is owned by that provider. Exact root equality is retained only for the
+    // legacy fallback because exact roots may legitimately include block ids.
+    if (!input.marketDrift
+      && input.quote.marketSnapshotRoot !== input.refreshedObservation.marketSnapshotRoot) {
       state = "stale";
       reasons.push("QUOTE_MARKET_DRIFT");
     }

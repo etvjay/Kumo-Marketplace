@@ -9,6 +9,7 @@ export * from "./geckoterminal-market-data.js";
 export * from "./live-preparation.js";
 export * from "./shadow-models.js";
 export * from "./shadow-assessment.js";
+export * from "./market-drift.js";
 export * from "./noema.js";
 export * from "./strategy.js";
 export * from "./pancakeswap-v3.js";
