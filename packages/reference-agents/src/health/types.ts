@@ -5,11 +5,15 @@ export type VenusNativeSolvencyStatus = "SOLVENT" | "AT_LIQUIDATION_THRESHOLD" |
 export interface VenusCoreMarketAccountSnapshot {
   vToken: string;
   enteredAsCollateralMarket: boolean;
+  isListed: boolean;
   snapshotError: bigint;
   vTokenBalance: bigint;
   borrowBalance: bigint;
   exchangeRateMantissa: bigint;
   underlyingPriceMantissa: bigint;
+  baseCollateralFactorMantissa: bigint;
+  baseLiquidationThresholdMantissa: bigint;
+  baseLiquidationIncentiveMantissa: bigint;
 }
 
 export interface VenusCoreAccountState {
