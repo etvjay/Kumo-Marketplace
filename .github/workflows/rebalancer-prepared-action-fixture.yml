@@ -10,9 +10,11 @@ on:
       - "packages/reference-agents/src/rebalancer/v3-math.ts"
       - "packages/reference-agents/src/rebalancer/economics.ts"
       - "packages/adapters/src/altana-authority.ts"
+      - "packages/adapters/src/anvil-stateful-canary.ts"
       - "scripts/rebalancer-prepared-action-fixture.mjs"
       - "scripts/rebalancer-market-drift-fixture.mjs"
       - "scripts/altana-session-blueprint-fixture.mjs"
+      - "scripts/anvil-stateful-canary-fixture.mjs"
       - ".github/workflows/rebalancer-prepared-action-fixture.yml"
   workflow_dispatch:
 
@@ -52,6 +54,11 @@ jobs:
         env:
           KUMO_EVIDENCE_PATH: evidence/fixtures/rebalancer-prepared-action.json
         run: node scripts/altana-session-blueprint-fixture.mjs
+
+      - name: Verify Anvil stateful canary transport fixture
+        env:
+          KUMO_EVIDENCE_PATH: evidence/fixtures/rebalancer-prepared-action.json
+        run: node scripts/anvil-stateful-canary-fixture.mjs
 
       - name: Upload fixture artifact
         if: always()
