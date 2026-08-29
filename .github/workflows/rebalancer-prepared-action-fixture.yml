@@ -9,8 +9,10 @@ on:
       - "packages/reference-agents/src/rebalancer/market-drift.ts"
       - "packages/reference-agents/src/rebalancer/v3-math.ts"
       - "packages/reference-agents/src/rebalancer/economics.ts"
+      - "packages/adapters/src/altana-authority.ts"
       - "scripts/rebalancer-prepared-action-fixture.mjs"
       - "scripts/rebalancer-market-drift-fixture.mjs"
+      - "scripts/altana-session-blueprint-fixture.mjs"
       - ".github/workflows/rebalancer-prepared-action-fixture.yml"
   workflow_dispatch:
 
@@ -45,6 +47,11 @@ jobs:
 
       - name: Verify semantic market drift fixture
         run: node scripts/rebalancer-market-drift-fixture.mjs
+
+      - name: Verify Altana session translation fixture
+        env:
+          KUMO_EVIDENCE_PATH: evidence/fixtures/rebalancer-prepared-action.json
+        run: node scripts/altana-session-blueprint-fixture.mjs
 
       - name: Upload fixture artifact
         if: always()

@@ -10,6 +10,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
+    "@kumo/financial-agent-kernel": "workspace:*",
     "@kumo/shared": "workspace:*"
   },
   "devDependencies": {
