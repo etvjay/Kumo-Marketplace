@@ -1,0 +1,52 @@
+name: Rebalancer Smart Router Quote Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/rebalancer/pancakeswap-smart-router-quote-provider.ts"
+      - "packages/reference-agents/src/rebalancer/pancakeswap-v3-transaction-preparer.ts"
+      - "packages/reference-agents/package.json"
+      - "package.json"
+      - "scripts/rebalancer-smart-router-quote-probe.mjs"
+      - ".github/workflows/rebalancer-smart-router-quote-probe.yml"
+  workflow_dispatch:
+
+jobs:
+  quote:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Obtain unsigned live Pancake Smart Router quote
+        env:
+          BSC_RPC_URL: https://bsc-rpc.publicnode.com
+          KUMO_EVIDENCE_PATH: evidence/live/rebalancer-smart-router-quote-probe.json
+        run: node scripts/rebalancer-smart-router-quote-probe.mjs
+
+      - name: Upload quote evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebalancer-smart-router-quote-${{ github.sha }}
+          path: evidence/live/rebalancer-smart-router-quote-probe.json
+          if-no-files-found: error
+          retention-days: 30
