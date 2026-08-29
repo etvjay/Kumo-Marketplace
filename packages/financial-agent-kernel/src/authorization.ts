@@ -1,6 +1,10 @@
 import { keccak256, toHex, type Hex } from "viem";
 import type { MarketDriftResult } from "./interfaces.js";
 import {
+  validatePreparedActionSimulationReceipt,
+  type PreparedActionSimulationReceipt
+} from "./simulation.js";
+import {
   preparedActionSchema,
   type ExecutableQuote,
   type PreparedAction,
@@ -71,6 +75,7 @@ export interface PreparedActionAuthorizationValidationInput {
   proposal: StrategyProposal;
   quote?: ExecutableQuote | null;
   marketDrift?: MarketDriftResult;
+  simulationReceipt?: PreparedActionSimulationReceipt;
   now: string;
   requireSimulationPassed?: boolean;
 }
@@ -82,6 +87,7 @@ export interface PreparedActionAuthorizationValidation {
   recomputedAuthorizationCommitment: Hex;
   reasons: string[];
   driftEvidenceRefs: string[];
+  simulationEvidenceRefs: string[];
 }
 
 function sameAddress(a: string, b: string): boolean {
@@ -98,13 +104,6 @@ function approvalMatchesBound(call: PreparedCall, bound: PreparedSpendBound): bo
     && call.amount === bound.maxAmount;
 }
 
-/**
- * Final pre-authority validation for a PreparedAction.
- *
- * This validates the exact consequential envelope, its proposal/quote lineage,
- * semantic refresh result, spend-bound/approval coherence and simulation gate.
- * It never grants authority, signs, or broadcasts a transaction.
- */
 export function validatePreparedActionForAuthorization(
   input: PreparedActionAuthorizationValidationInput
 ): PreparedActionAuthorizationValidation {
@@ -118,15 +117,9 @@ export function validatePreparedActionForAuthorization(
   const proposalExpiresAtMs = Date.parse(input.proposal.expiresAt);
   if (!Number.isFinite(nowMs)) reasons.push("AUTHORIZATION_CLOCK_INVALID");
   if (!Number.isFinite(createdAtMs) || !Number.isFinite(expiresAtMs)) reasons.push("ACTION_TIME_INVALID");
-  if (Number.isFinite(createdAtMs) && Number.isFinite(expiresAtMs) && createdAtMs >= expiresAtMs) {
-    reasons.push("ACTION_TIME_WINDOW_INVALID");
-  }
-  if (Number.isFinite(nowMs) && Number.isFinite(expiresAtMs) && nowMs >= expiresAtMs) {
-    reasons.push("ACTION_EXPIRED");
-  }
-  if (Number.isFinite(expiresAtMs) && Number.isFinite(proposalExpiresAtMs) && expiresAtMs > proposalExpiresAtMs) {
-    reasons.push("ACTION_EXPIRY_EXCEEDS_PROPOSAL");
-  }
+  if (Number.isFinite(createdAtMs) && Number.isFinite(expiresAtMs) && createdAtMs >= expiresAtMs) reasons.push("ACTION_TIME_WINDOW_INVALID");
+  if (Number.isFinite(nowMs) && Number.isFinite(expiresAtMs) && nowMs >= expiresAtMs) reasons.push("ACTION_EXPIRED");
+  if (Number.isFinite(expiresAtMs) && Number.isFinite(proposalExpiresAtMs) && expiresAtMs > proposalExpiresAtMs) reasons.push("ACTION_EXPIRY_EXCEEDS_PROPOSAL");
 
   if (input.proposal.disposition !== "propose") reasons.push("STRATEGY_NOT_PROPOSED");
   if (input.action.proposalId !== input.proposal.id) reasons.push("PROPOSAL_ID_MISMATCH");
@@ -148,9 +141,7 @@ export function validatePreparedActionForAuthorization(
     reasons.push("UNBOUND_QUOTE_CONTEXT");
   }
 
-  if (!input.action.calls.every((call, index) => call.order === index)) {
-    reasons.push("CALL_ORDER_INVALID");
-  }
+  if (!input.action.calls.every((call, index) => call.order === index)) reasons.push("CALL_ORDER_INVALID");
 
   const positiveApprovals = input.action.calls.filter((call) =>
     call.kind === "approval" && call.amount !== undefined && BigInt(call.amount) > 0n
@@ -167,9 +158,7 @@ export function validatePreparedActionForAuthorization(
     }
   }
 
-  if (input.action.authorizationCommitmentVersion !== PREPARED_ACTION_AUTHORIZATION_COMMITMENT_VERSION) {
-    reasons.push("AUTHORIZATION_COMMITMENT_VERSION_MISMATCH");
-  }
+  if (input.action.authorizationCommitmentVersion !== PREPARED_ACTION_AUTHORIZATION_COMMITMENT_VERSION) reasons.push("AUTHORIZATION_COMMITMENT_VERSION_MISMATCH");
   const recomputedAuthorizationCommitment = computePreparedActionAuthorizationCommitment(input.action);
   const commitmentValid = recomputedAuthorizationCommitment.toLowerCase() === input.action.authorizationCommitment.toLowerCase();
   if (!commitmentValid) reasons.push("AUTHORIZATION_COMMITMENT_MISMATCH");
@@ -180,8 +169,13 @@ export function validatePreparedActionForAuthorization(
 
   const requireSimulationPassed = input.requireSimulationPassed ?? true;
   if (requireSimulationPassed) {
-    if (input.action.simulationStatus === "FAILED") reasons.push("SIMULATION_FAILED");
-    else if (input.action.simulationStatus !== "PASSED") reasons.push("SIMULATION_REQUIRED");
+    if (!input.simulationReceipt) {
+      reasons.push("SIMULATION_RECEIPT_REQUIRED");
+    } else {
+      const simulationValidation = validatePreparedActionSimulationReceipt(input.action, input.simulationReceipt);
+      for (const reason of simulationValidation.reasons) reasons.push(reason);
+    }
+    if (input.action.simulationStatus !== "PASSED") reasons.push("SIMULATION_STATUS_NOT_PROMOTED");
   }
 
   return {
@@ -190,6 +184,9 @@ export function validatePreparedActionForAuthorization(
     eligibleForAuthorization: reasons.length === 0,
     recomputedAuthorizationCommitment,
     reasons,
-    driftEvidenceRefs: input.marketDrift?.evidenceRefs ?? []
+    driftEvidenceRefs: input.marketDrift?.evidenceRefs ?? [],
+    simulationEvidenceRefs: input.simulationReceipt
+      ? [input.simulationReceipt.id, ...input.simulationReceipt.evidenceRefs]
+      : []
   };
 }

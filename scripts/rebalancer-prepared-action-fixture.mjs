@@ -1,7 +1,9 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import {
+  applyPreparedActionSimulationReceipt,
   preparedActionSchema,
+  sealPreparedActionSimulationReceipt,
   validatePreparedActionForAuthorization
 } from "../packages/financial-agent-kernel/dist/index.js";
 import {
@@ -62,31 +64,19 @@ const fixtureQuoteProvider = {
     quoteCalls += 1;
     const expectedAmountOut = input.tokenIn.toLowerCase() === USDT.toLowerCase() ? input.amountIn / 690n : input.amountIn * 689n;
     return {
-      quoteId: `fixture-quote:${input.amountIn.toString()}`,
-      quotedAt: "2026-08-29T05:00:00.000Z",
-      expiresAt: input.expiresAt,
-      router: PANCAKESWAP_V3_BSC.swapRouterV3,
-      tokenIn: input.tokenIn,
-      tokenOut: input.tokenOut,
-      amountIn: input.amountIn,
-      expectedAmountOut: expectedAmountOut > 0n ? expectedAmountOut : 1n,
-      calldata: "0x414bf389", value: 0n, gasEstimate: 150000n,
-      routeRef: "fixture:pancake-v3:quote", evidenceRefs: ["fixture:quote:evidence"]
+      quoteId: `fixture-quote:${input.amountIn.toString()}`, quotedAt: "2026-08-29T05:00:00.000Z", expiresAt: input.expiresAt,
+      router: PANCAKESWAP_V3_BSC.swapRouterV3, tokenIn: input.tokenIn, tokenOut: input.tokenOut, amountIn: input.amountIn,
+      expectedAmountOut: expectedAmountOut > 0n ? expectedAmountOut : 1n, calldata: "0x414bf389", value: 0n,
+      gasEstimate: 150000n, routeRef: "fixture:pancake-v3:quote", evidenceRefs: ["fixture:quote:evidence"]
     };
   }
 };
 
 const output = {
-  schemaVersion: "kumo-rebalancer-prepared-action-fixture-v2",
-  generatedAt: new Date(fixedNow).toISOString(),
-  classification: "TEST_FIXTURE_NOT_LIVE_EVIDENCE",
-  status: "STARTED",
-  composition: undefined,
-  preparedAction: undefined,
-  authorizationValidation: undefined,
-  mutationResults: undefined,
-  invariants: undefined,
-  errors: []
+  schemaVersion: "kumo-rebalancer-prepared-action-fixture-v3",
+  generatedAt: new Date(fixedNow).toISOString(), classification: "TEST_FIXTURE_NOT_LIVE_EVIDENCE", status: "STARTED",
+  composition: undefined, preparedAction: undefined, simulationReceipt: undefined, authorizationValidation: undefined,
+  mutationResults: undefined, invariants: undefined, errors: []
 };
 
 try {
@@ -97,28 +87,42 @@ try {
   preparedActionSchema.parse(first);
   preparedActionSchema.parse(second);
 
+  const simulationReceipt = sealPreparedActionSimulationReceipt({
+    schemaVersion: "kumo-prepared-action-simulation-v1",
+    id: `simulation:${first.id}:fixture`,
+    actionId: first.id,
+    authorizationCommitment: first.authorizationCommitment,
+    executionChainId: first.executionChainId,
+    simulationKind: "STATEFUL_FORK",
+    engine: "TEST_FIXTURE_STATEFUL_FORK_STUB",
+    simulatedAt: "2026-08-29T05:00:00.500Z",
+    forkBlockNumber: "118704900",
+    forkBlockHash: "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    passed: true,
+    callResults: first.calls.map((call) => ({ order: call.order, passed: true, transactionHash: `0x${call.order.toString(16).padStart(64, "0")}`, gasUsed: "100000" })),
+    evidenceRefs: ["fixture:stateful-fork:118704900"]
+  });
+  const simulated = applyPreparedActionSimulationReceipt(first, simulationReceipt);
+
   const kernelQuote = {
-    id: first.quoteId,
-    proposalId: proposal.id,
-    quotedAt: first.createdAt,
-    expiresAt: first.expiresAt,
-    chainId: 56,
-    venue: "pancakeswap-v3",
-    totalCost: 1,
-    slippageBps: 5,
-    marketSnapshotRoot: proposal.marketSnapshotRoot
+    id: first.quoteId, proposalId: proposal.id, quotedAt: first.createdAt, expiresAt: first.expiresAt,
+    chainId: 56, venue: "pancakeswap-v3", totalCost: 1, slippageBps: 5, marketSnapshotRoot: proposal.marketSnapshotRoot
   };
   const noDrift = { drifted: false, reasons: [], evidenceRefs: ["fixture:semantic-refresh:pass"] };
   const notSimulated = validatePreparedActionForAuthorization({ action: first, proposal, quote: kernelQuote, marketDrift: noDrift, now: "2026-08-29T05:00:01.000Z" });
-  const simulated = { ...first, simulationStatus: "PASSED" };
-  const ready = validatePreparedActionForAuthorization({ action: simulated, proposal, quote: kernelQuote, marketDrift: noDrift, now: "2026-08-29T05:00:01.000Z" });
+  const flippedWithoutReceipt = validatePreparedActionForAuthorization({ action: { ...first, simulationStatus: "PASSED" }, proposal, quote: kernelQuote, marketDrift: noDrift, now: "2026-08-29T05:00:01.000Z" });
+  const ready = validatePreparedActionForAuthorization({ action: simulated, proposal, quote: kernelQuote, marketDrift: noDrift, simulationReceipt, now: "2026-08-29T05:00:01.000Z" });
 
+  const mutation = (actionPatch, receipt = simulationReceipt) => validatePreparedActionForAuthorization({
+    action: { ...simulated, ...actionPatch }, proposal, quote: kernelQuote, marketDrift: noDrift, simulationReceipt: receipt, now: "2026-08-29T05:00:01.000Z"
+  });
   const mutations = {
-    signer: validatePreparedActionForAuthorization({ action: { ...simulated, signer: ALT_SIGNER }, proposal, quote: kernelQuote, marketDrift: noDrift, now: "2026-08-29T05:00:01.000Z" }),
-    chain: validatePreparedActionForAuthorization({ action: { ...simulated, executionChainId: 1 }, proposal, quote: kernelQuote, marketDrift: noDrift, now: "2026-08-29T05:00:01.000Z" }),
-    quoteId: validatePreparedActionForAuthorization({ action: { ...simulated, quoteId: "fixture-quote:tampered" }, proposal, quote: kernelQuote, marketDrift: noDrift, now: "2026-08-29T05:00:01.000Z" }),
-    spendBound: validatePreparedActionForAuthorization({ action: { ...simulated, spendBounds: simulated.spendBounds.map((bound, index) => index === 0 ? { ...bound, maxAmount: (BigInt(bound.maxAmount) + 1n).toString() } : bound) }, proposal, quote: kernelQuote, marketDrift: noDrift, now: "2026-08-29T05:00:01.000Z" }),
-    marketDrift: validatePreparedActionForAuthorization({ action: simulated, proposal, quote: kernelQuote, marketDrift: { drifted: true, reasons: ["SPOT_PRICE_DRIFT_BPS:9.0000"] }, now: "2026-08-29T05:00:01.000Z" })
+    signer: mutation({ signer: ALT_SIGNER }),
+    chain: mutation({ executionChainId: 1 }),
+    quoteId: mutation({ quoteId: "fixture-quote:tampered" }),
+    spendBound: mutation({ spendBounds: simulated.spendBounds.map((bound, index) => index === 0 ? { ...bound, maxAmount: (BigInt(bound.maxAmount) + 1n).toString() } : bound) }),
+    marketDrift: validatePreparedActionForAuthorization({ action: simulated, proposal, quote: kernelQuote, marketDrift: { drifted: true, reasons: ["SPOT_PRICE_DRIFT_BPS:9.0000"] }, simulationReceipt, now: "2026-08-29T05:00:01.000Z" }),
+    simulationReceipt: validatePreparedActionForAuthorization({ action: simulated, proposal, quote: kernelQuote, marketDrift: noDrift, simulationReceipt: { ...simulationReceipt, forkBlockNumber: "999" }, now: "2026-08-29T05:00:01.000Z" })
   };
 
   const kinds = first.calls.map((call) => call.kind);
@@ -133,33 +137,27 @@ try {
   const hasExactApprovals = kinds.includes("approval-reset") && kinds.includes("approval") && kinds.includes("approval-revoke");
   const noAuthority = first.signingStatus === "UNSIGNED" && first.simulationStatus === "NOT_RUN";
   const nonAtomicDeclared = first.atomic === false;
-  const executionCommitmentShape = /^0x[0-9a-fA-F]{64}$/.test(first.executionCommitment);
-  const authorizationCommitmentShape = /^0x[0-9a-fA-F]{64}$/.test(first.authorizationCommitment);
-  const simulationRequired = !notSimulated.eligibleForAuthorization && notSimulated.reasons.includes("SIMULATION_REQUIRED");
+  const simulationReceiptRequired = !notSimulated.eligibleForAuthorization && notSimulated.reasons.includes("SIMULATION_RECEIPT_REQUIRED");
+  const bareFlipRejected = !flippedWithoutReceipt.eligibleForAuthorization && flippedWithoutReceipt.reasons.includes("SIMULATION_RECEIPT_REQUIRED");
   const simulatedReady = ready.eligibleForAuthorization;
-  const signerMutationCaught = mutations.signer.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH");
-  const chainMutationCaught = mutations.chain.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.chain.reasons.includes("QUOTE_CHAIN_MISMATCH");
+  const signerMutationCaught = mutations.signer.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.signer.reasons.includes("SIMULATION_AUTHORIZATION_COMMITMENT_MISMATCH");
+  const chainMutationCaught = mutations.chain.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.chain.reasons.includes("QUOTE_CHAIN_MISMATCH") && mutations.chain.reasons.includes("SIMULATION_CHAIN_MISMATCH");
   const quoteMutationCaught = mutations.quoteId.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.quoteId.reasons.includes("QUOTE_ID_MISMATCH");
   const spendMutationCaught = mutations.spendBound.reasons.includes("AUTHORIZATION_COMMITMENT_MISMATCH") && mutations.spendBound.reasons.some((reason) => reason.startsWith("SPEND_BOUND_APPROVAL_MISMATCH:"));
   const driftCaught = mutations.marketDrift.reasons.includes("MARKET_DRIFT:SPOT_PRICE_DRIFT_BPS:9.0000");
+  const simulationMutationCaught = mutations.simulationReceipt.reasons.includes("SIMULATION_RECEIPT_COMMITMENT_MISMATCH");
 
   const passed = ordersContiguous && exactExecutionCommitmentReproducible && exactAuthorizationCommitmentReproducible
     && hasRemove && hasCollect && hasSwap && hasMint && hasExactApprovals && noAuthority && nonAtomicDeclared
-    && executionCommitmentShape && authorizationCommitmentShape && simulationRequired && simulatedReady
-    && signerMutationCaught && chainMutationCaught && quoteMutationCaught && spendMutationCaught && driftCaught
-    && quoteCalls === 2;
+    && simulationReceiptRequired && bareFlipRejected && simulatedReady && signerMutationCaught && chainMutationCaught
+    && quoteMutationCaught && spendMutationCaught && driftCaught && simulationMutationCaught && quoteCalls === 2;
 
   output.composition = { targetTickLower: composition.targetTickLower, targetTickUpper: composition.targetTickUpper, swapDirection: composition.swapDirection, swapAmountInRaw: composition.swapAmountInRaw };
   output.preparedAction = first;
-  output.authorizationValidation = { notSimulated, simulatedReady: ready };
+  output.simulationReceipt = simulationReceipt;
+  output.authorizationValidation = { notSimulated, flippedWithoutReceipt, simulatedReady: ready };
   output.mutationResults = mutations;
-  output.invariants = {
-    ordersContiguous, exactExecutionCommitmentReproducible, exactAuthorizationCommitmentReproducible,
-    hasRemove, hasCollect, hasSwap, hasMint, hasExactApprovals, noAuthority, nonAtomicDeclared,
-    executionCommitmentShape, authorizationCommitmentShape, simulationRequired, simulatedReady,
-    signerMutationCaught, chainMutationCaught, quoteMutationCaught, spendMutationCaught, driftCaught,
-    quoteCalls, passed
-  };
+  output.invariants = { ordersContiguous, exactExecutionCommitmentReproducible, exactAuthorizationCommitmentReproducible, hasRemove, hasCollect, hasSwap, hasMint, hasExactApprovals, noAuthority, nonAtomicDeclared, simulationReceiptRequired, bareFlipRejected, simulatedReady, signerMutationCaught, chainMutationCaught, quoteMutationCaught, spendMutationCaught, driftCaught, simulationMutationCaught, quoteCalls, passed };
   output.status = passed ? "PREPARED_ACTION_AUTHORIZATION_FIXTURE_PASS" : "PREPARED_ACTION_AUTHORIZATION_FIXTURE_FAIL";
   if (!passed) process.exitCode = 1;
 } catch (error) {
