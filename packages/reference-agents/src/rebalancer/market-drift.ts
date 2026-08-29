@@ -25,39 +25,33 @@ function numberValue(observation: ObservationSnapshot, key: string): number | un
   const value = observation.values[key];
   return typeof value === "number" && Number.isFinite(value) ? value : undefined;
 }
-
 function stringValue(observation: ObservationSnapshot, key: string): string | undefined {
   const value = observation.values[key];
   return typeof value === "string" ? value : undefined;
 }
-
 function booleanValue(observation: ObservationSnapshot, key: string): boolean | undefined {
   const value = observation.values[key];
   return typeof value === "boolean" ? value : undefined;
 }
-
 function driftBps(previous: number, current: number): number {
   if (previous === 0) return current === 0 ? 0 : Number.POSITIVE_INFINITY;
   return Math.abs(current - previous) / Math.abs(previous) * 10_000;
 }
-
 function declineBps(previous: number, current: number): number {
   if (previous <= 0) return current < previous ? Number.POSITIVE_INFINITY : 0;
   return Math.max(0, previous - current) / previous * 10_000;
 }
 
-/**
- * Rebalancer semantic market-drift comparator.
- *
- * Exact snapshot roots are still preserved for provenance, but a new block
- * number alone is not economic drift. Consequential preparation is invalidated
- * when position identity/range/regime changes or when price, value, tick, or
- * available pool liquidity move beyond explicit tolerances.
- */
 export class RebalancerMarketDriftProvider implements MarketDriftProvider {
-  readonly id = "kumo-rebalancer-market-drift-v1";
+  readonly id = "kumo-rebalancer-market-drift-v2";
+  private readonly clock: () => string;
 
-  constructor(private readonly policy: RebalancerMarketDriftPolicy = DEFAULT_REBALANCER_MARKET_DRIFT_POLICY) {}
+  constructor(
+    private readonly policy: RebalancerMarketDriftPolicy = DEFAULT_REBALANCER_MARKET_DRIFT_POLICY,
+    clock?: () => string
+  ) {
+    this.clock = clock ?? (() => new Date().toISOString());
+  }
 
   async compare(input: {
     context: StrategyRunContext;
@@ -70,21 +64,15 @@ export class RebalancerMarketDriftProvider implements MarketDriftProvider {
     const previous = input.previousObservation;
     const current = input.refreshedObservation;
 
-    if (input.proposal.marketSnapshotRoot !== previous.marketSnapshotRoot) {
-      reasons.push("PROPOSAL_PRIOR_ROOT_MISMATCH");
-    }
-    if (input.quote && input.quote.marketSnapshotRoot !== input.proposal.marketSnapshotRoot) {
-      reasons.push("QUOTE_PROPOSAL_ROOT_MISMATCH");
-    }
+    if (input.proposal.marketSnapshotRoot !== previous.marketSnapshotRoot) reasons.push("PROPOSAL_PRIOR_ROOT_MISMATCH");
+    if (input.quote && input.quote.marketSnapshotRoot !== input.proposal.marketSnapshotRoot) reasons.push("QUOTE_PROPOSAL_ROOT_MISMATCH");
     if (previous.chainId !== current.chainId) reasons.push("CHAIN_CHANGED");
     if (previous.agentId !== current.agentId) reasons.push("AGENT_CHANGED");
     if (previous.category !== current.category) reasons.push("CATEGORY_CHANGED");
 
     const previousPositionId = stringValue(previous, "positionId");
     const currentPositionId = stringValue(current, "positionId");
-    if (!previousPositionId || !currentPositionId || previousPositionId !== currentPositionId) {
-      reasons.push("POSITION_ID_CHANGED");
-    }
+    if (!previousPositionId || !currentPositionId || previousPositionId !== currentPositionId) reasons.push("POSITION_ID_CHANGED");
 
     for (const key of ["tickLower", "tickUpper"] as const) {
       const a = numberValue(previous, key);
@@ -101,9 +89,7 @@ export class RebalancerMarketDriftProvider implements MarketDriftProvider {
     const previousTick = numberValue(previous, "currentTick");
     const currentTick = numberValue(current, "currentTick");
     if (previousTick === undefined || currentTick === undefined) reasons.push("CURRENT_TICK_MISSING");
-    else if (Math.abs(currentTick - previousTick) > this.policy.maxTickDrift) {
-      reasons.push(`TICK_DRIFT_EXCEEDED:${Math.abs(currentTick - previousTick)}`);
-    }
+    else if (Math.abs(currentTick - previousTick) > this.policy.maxTickDrift) reasons.push(`TICK_DRIFT_EXCEEDED:${Math.abs(currentTick - previousTick)}`);
 
     const previousSpot = numberValue(previous, "spotPrice");
     const currentSpot = numberValue(current, "spotPrice");
@@ -131,13 +117,16 @@ export class RebalancerMarketDriftProvider implements MarketDriftProvider {
 
     const previousBlock = numberValue(previous, "blockNumber");
     const currentBlock = numberValue(current, "blockNumber");
-    if (previousBlock !== undefined && currentBlock !== undefined && currentBlock < previousBlock) {
-      reasons.push(`BLOCK_REGRESSION:${previousBlock}->${currentBlock}`);
-    }
+    if (previousBlock !== undefined && currentBlock !== undefined && currentBlock < previousBlock) reasons.push(`BLOCK_REGRESSION:${previousBlock}->${currentBlock}`);
 
+    const evaluatedAt = this.clock();
+    if (!Number.isFinite(Date.parse(evaluatedAt))) throw new Error("REBALANCER_DRIFT_CLOCK_INVALID");
     return {
       drifted: reasons.length > 0,
       reasons,
+      evaluatedAt,
+      priorSnapshotRoot: previous.marketSnapshotRoot,
+      refreshedSnapshotRoot: current.marketSnapshotRoot,
       evidenceRefs: [
         ...previous.evidenceRefs.map((ref) => `prior:${ref}`),
         ...current.evidenceRefs.map((ref) => `refresh:${ref}`)

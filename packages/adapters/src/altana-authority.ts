@@ -18,7 +18,6 @@ export const ALTANA_SDK_PROFILE = {
 
 export interface AltanaCallPermission { to: string; signature: string; }
 export interface AltanaSpendPermission { token: string; limit: bigint; period: "minute"; }
-
 export interface AltanaSessionBlueprint {
   schemaVersion: "kumo-altana-session-blueprint-v2";
   walletAddress: string;
@@ -42,12 +41,8 @@ const REBALANCER_FUNCTION_SIGNATURES = [
   "mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))",
   "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))"
 ] as const;
-const REBALANCER_SELECTOR_TO_SIGNATURE = new Map<string, string>(
-  REBALANCER_FUNCTION_SIGNATURES.map((signature) => [toFunctionSelector(signature).toLowerCase(), signature])
-);
-
+const REBALANCER_SELECTOR_TO_SIGNATURE = new Map<string, string>(REBALANCER_FUNCTION_SIGNATURES.map((signature) => [toFunctionSelector(signature).toLowerCase(), signature]));
 function sameAddress(a: string, b: string): boolean { return a.toLowerCase() === b.toLowerCase(); }
-
 function aggregateSpend(bounds: PreparedSpendBound[]): AltanaSpendPermission[] {
   const totals = new Map<string, { token: string; total: bigint }>();
   for (const bound of bounds) {
@@ -56,12 +51,8 @@ function aggregateSpend(bounds: PreparedSpendBound[]): AltanaSpendPermission[] {
     current.total += BigInt(bound.maxAmount);
     totals.set(key, current);
   }
-  return [...totals.values()]
-    .filter((entry) => entry.total > 0n)
-    .sort((a, b) => a.token.toLowerCase().localeCompare(b.token.toLowerCase()))
-    .map((entry) => ({ token: entry.token, limit: entry.total, period: "minute" as const }));
+  return [...totals.values()].filter((entry) => entry.total > 0n).sort((a, b) => a.token.toLowerCase().localeCompare(b.token.toLowerCase())).map((entry) => ({ token: entry.token, limit: entry.total, period: "minute" as const }));
 }
-
 function functionSignatureForCall(call: PreparedCall): string {
   if (call.data.length < 10) throw new Error(`ALTANA_CALL_SELECTOR_MISSING:${call.order}`);
   const selector = call.data.slice(0, 10).toLowerCase();
@@ -69,7 +60,6 @@ function functionSignatureForCall(call: PreparedCall): string {
   if (!signature) throw new Error(`ALTANA_UNRECOGNIZED_CALL_SELECTOR:${call.order}:${selector}`);
   return signature;
 }
-
 function exactCallPermissions(action: PreparedAction): AltanaCallPermission[] {
   const seen = new Map<string, AltanaCallPermission>();
   for (const call of action.calls) {
@@ -94,7 +84,6 @@ export function buildAltanaSessionBlueprint(input: {
 }): AltanaSessionBlueprint {
   if (!sameAddress(input.action.signer, input.altanaWalletAddress)) throw new Error("ALTANA_WALLET_DOES_NOT_OWN_PREPARED_ACTION");
   if (input.action.executionChainId !== 56) throw new Error("ALTANA_BNB_EXECUTION_CHAIN_REQUIRED");
-
   const validation = validatePreparedActionForAuthorization({
     action: input.action,
     proposal: input.proposal,
@@ -102,18 +91,17 @@ export function buildAltanaSessionBlueprint(input: {
     marketDrift: input.marketDrift,
     simulationReceipt: input.simulationReceipt,
     now: input.now,
-    requireSimulationPassed: true
+    requireSimulationPassed: true,
+    requireFreshMarketDrift: true,
+    maxMarketDriftAgeMs: 15_000
   });
   if (!validation.eligibleForAuthorization) throw new Error(`PREPARED_ACTION_NOT_AUTHORIZATION_ELIGIBLE:${validation.reasons.join(",")}`);
-
   const expiryMs = Date.parse(input.action.expiresAt);
   if (!Number.isFinite(expiryMs)) throw new Error("ALTANA_ACTION_EXPIRY_INVALID");
   const expiry = Math.floor(expiryMs / 1000);
   if (expiry <= Math.floor(Date.parse(input.now) / 1000)) throw new Error("ALTANA_ACTION_ALREADY_EXPIRED");
-
   const calls = exactCallPermissions(input.action);
   if (calls.length === 0) throw new Error("ALTANA_CALL_ALLOWLIST_EMPTY");
-
   return {
     schemaVersion: "kumo-altana-session-blueprint-v2",
     walletAddress: input.altanaWalletAddress,
@@ -130,7 +118,8 @@ export function buildAltanaSessionBlueprint(input: {
     limitations: [
       "This blueprint does not grant a session; it is deterministic input for Altana grantSession.",
       "Altana enforces target + function signature permissions; Kumo's authorization commitment separately binds exact calldata arguments and ordered calls.",
-      "Authorization also requires a stateful-fork simulation receipt bound to the same action and authorization commitment.",
+      "Authorization requires a stateful-fork simulation receipt bound to the same action and authorization commitment.",
+      "Authorization also requires semantic market drift to have been re-evaluated within 15 seconds of the grant attempt.",
       "Token spend caps conservatively sum Kumo spend bounds per token over Altana's minimum rolling period of one minute.",
       "The session must be KeyStore-registered; register=false is not permitted for hackathon evidence.",
       "The Altana wallet must own or control the consequential assets referenced by the PreparedAction before live execution."
@@ -139,15 +128,8 @@ export function buildAltanaSessionBlueprint(input: {
 }
 
 export interface AltanaGrantSessionPort {
-  grantSession(input: {
-    walletAddress: string;
-    permissions: AltanaSessionBlueprint["permissions"];
-    expiry: number;
-    register: true;
-    authorizationCommitment: string;
-  }): Promise<{ walletAddress: string; publicKey: string; expiry: number; transactionHash?: string; authorityRef: string; }>;
+  grantSession(input: { walletAddress: string; permissions: AltanaSessionBlueprint["permissions"]; expiry: number; register: true; authorizationCommitment: string; }): Promise<{ walletAddress: string; publicKey: string; expiry: number; transactionHash?: string; authorityRef: string; }>;
 }
-
 export interface AltanaAuthorityReceipt {
   provider: "ALTANA";
   providerProfile: typeof ALTANA_SDK_PROFILE;
@@ -160,29 +142,16 @@ export interface AltanaAuthorityReceipt {
   authorityRef: string;
   registeredInKeyStore: true;
 }
-
 export async function grantAltanaAuthority(input: { blueprint: AltanaSessionBlueprint; port: AltanaGrantSessionPort; }): Promise<AltanaAuthorityReceipt> {
-  const grant = await input.port.grantSession({
-    walletAddress: input.blueprint.walletAddress,
-    permissions: input.blueprint.permissions,
-    expiry: input.blueprint.expiry,
-    register: true,
-    authorizationCommitment: input.blueprint.authorizationCommitment
-  });
+  const grant = await input.port.grantSession({ walletAddress: input.blueprint.walletAddress, permissions: input.blueprint.permissions, expiry: input.blueprint.expiry, register: true, authorizationCommitment: input.blueprint.authorizationCommitment });
   if (!sameAddress(grant.walletAddress, input.blueprint.walletAddress)) throw new Error("ALTANA_GRANTED_WALLET_MISMATCH");
   if (grant.expiry !== input.blueprint.expiry) throw new Error("ALTANA_GRANTED_EXPIRY_MISMATCH");
   if (!grant.publicKey) throw new Error("ALTANA_SESSION_PUBLIC_KEY_REQUIRED");
   if (!grant.authorityRef) throw new Error("ALTANA_AUTHORITY_REF_REQUIRED");
   return {
-    provider: "ALTANA",
-    providerProfile: ALTANA_SDK_PROFILE,
-    walletAddress: grant.walletAddress,
-    sessionPublicKey: grant.publicKey,
-    expiry: grant.expiry,
-    authorizationCommitment: input.blueprint.authorizationCommitment,
+    provider: "ALTANA", providerProfile: ALTANA_SDK_PROFILE, walletAddress: grant.walletAddress, sessionPublicKey: grant.publicKey,
+    expiry: grant.expiry, authorizationCommitment: input.blueprint.authorizationCommitment,
     simulationReceiptCommitment: input.blueprint.simulationReceiptCommitment,
-    ...(grant.transactionHash ? { grantTransactionHash: grant.transactionHash } : {}),
-    authorityRef: grant.authorityRef,
-    registeredInKeyStore: true
+    ...(grant.transactionHash ? { grantTransactionHash: grant.transactionHash } : {}), authorityRef: grant.authorityRef, registeredInKeyStore: true
   };
 }

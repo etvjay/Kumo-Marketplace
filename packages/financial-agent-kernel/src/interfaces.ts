@@ -23,45 +23,15 @@ export interface StrategyRunContext {
 export interface FinancialAgentStrategy {
   readonly id: string;
   readonly category: MarketplaceCategory;
-
   observe(context: StrategyRunContext): Promise<ObservationSnapshot>;
-
-  investigate(input: {
-    context: StrategyRunContext;
-    observation: ObservationSnapshot;
-  }): Promise<EvidencePacket>;
-
-  propose(input: {
-    context: StrategyRunContext;
-    observation: ObservationSnapshot;
-    evidence: EvidencePacket;
-  }): Promise<StrategyProposal>;
-
-  quote(input: {
-    context: StrategyRunContext;
-    observation: ObservationSnapshot;
-    evidence: EvidencePacket;
-    proposal: StrategyProposal;
-  }): Promise<ExecutableQuote | null>;
-
-  refresh(input: {
-    context: StrategyRunContext;
-    proposal: StrategyProposal;
-    previousObservation: ObservationSnapshot;
-  }): Promise<ObservationSnapshot>;
-
-  measure(input: {
-    context: StrategyRunContext;
-    receipt: ExecutionReceipt;
-    baselineRef?: string;
-  }): Promise<OutcomeRecord>;
+  investigate(input: { context: StrategyRunContext; observation: ObservationSnapshot; }): Promise<EvidencePacket>;
+  propose(input: { context: StrategyRunContext; observation: ObservationSnapshot; evidence: EvidencePacket; }): Promise<StrategyProposal>;
+  quote(input: { context: StrategyRunContext; observation: ObservationSnapshot; evidence: EvidencePacket; proposal: StrategyProposal; }): Promise<ExecutableQuote | null>;
+  refresh(input: { context: StrategyRunContext; proposal: StrategyProposal; previousObservation: ObservationSnapshot; }): Promise<ObservationSnapshot>;
+  measure(input: { context: StrategyRunContext; receipt: ExecutionReceipt; baselineRef?: string; }): Promise<OutcomeRecord>;
 }
 
-/**
- * Converts an accepted strategy proposal and current executable quote into the
- * exact bounded calls that may later be authorized. Preparation itself creates
- * no authority and must never sign or broadcast transactions.
- */
+/** Converts an accepted proposal and quote into exact bounded calls. No authority is created here. */
 export interface PreparedActionProvider {
   readonly id: string;
   prepare(input: {
@@ -76,15 +46,19 @@ export interface PreparedActionProvider {
 export interface MarketDriftResult {
   drifted: boolean;
   reasons: string[];
+  /** Wall-clock time at which the semantic comparison was completed. */
+  evaluatedAt: string;
+  /** Exact provenance root the action/proposal was originally based on. */
+  priorSnapshotRoot: string;
+  /** Exact provenance root of the fresh observation used for comparison. */
+  refreshedSnapshotRoot: string;
   evidenceRefs?: string[];
 }
 
 /**
  * Domain-specific semantic drift comparator.
- *
- * Snapshot roots remain exact provenance identifiers. This provider answers a
- * different question: whether a later observation is still economically close
- * enough to the state on which a consequential action was proposed/quoted.
+ * Snapshot roots remain exact provenance identifiers; this provider answers
+ * whether a later observation is still economically close enough to authorize.
  */
 export interface MarketDriftProvider {
   readonly id: string;
@@ -110,11 +84,7 @@ export interface RiskGateProvider {
 
 export interface CanaryProvider {
   readonly id: string;
-  run(input: {
-    context: StrategyRunContext;
-    proposal: StrategyProposal;
-    quote: ExecutableQuote;
-  }): Promise<CanaryResult>;
+  run(input: { context: StrategyRunContext; proposal: StrategyProposal; quote: ExecutableQuote; }): Promise<CanaryResult>;
 }
 
 export interface FinancialExecutionProvider {

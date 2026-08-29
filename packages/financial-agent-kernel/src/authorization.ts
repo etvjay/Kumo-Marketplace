@@ -14,6 +14,7 @@ import {
 } from "./types.js";
 
 export const PREPARED_ACTION_AUTHORIZATION_COMMITMENT_VERSION = "kumo-prepared-action-authorization-v2" as const;
+export const DEFAULT_AUTHORIZATION_MAX_MARKET_DRIFT_AGE_MS = 15_000;
 
 export interface PreparedActionAuthorizationMaterial {
   proposalId: string;
@@ -29,32 +30,13 @@ export interface PreparedActionAuthorizationMaterial {
 }
 
 function canonicalCall(call: PreparedCall) {
-  return {
-    order: call.order,
-    kind: call.kind,
-    label: call.label,
-    to: call.to.toLowerCase(),
-    data: call.data.toLowerCase(),
-    value: call.value,
-    asset: call.asset?.toLowerCase() ?? null,
-    amount: call.amount ?? null,
-    spender: call.spender?.toLowerCase() ?? null
-  };
+  return { order: call.order, kind: call.kind, label: call.label, to: call.to.toLowerCase(), data: call.data.toLowerCase(), value: call.value, asset: call.asset?.toLowerCase() ?? null, amount: call.amount ?? null, spender: call.spender?.toLowerCase() ?? null };
 }
-
 function canonicalSpendBound(bound: PreparedSpendBound) {
-  return {
-    asset: bound.asset.toLowerCase(),
-    maxAmount: bound.maxAmount,
-    spender: bound.spender.toLowerCase(),
-    purpose: bound.purpose
-  };
+  return { asset: bound.asset.toLowerCase(), maxAmount: bound.maxAmount, spender: bound.spender.toLowerCase(), purpose: bound.purpose };
 }
-
-export function computePreparedActionAuthorizationCommitment(
-  input: PreparedActionAuthorizationMaterial
-): Hex {
-  const canonical = JSON.stringify({
+export function computePreparedActionAuthorizationCommitment(input: PreparedActionAuthorizationMaterial): Hex {
+  return keccak256(toHex(JSON.stringify({
     version: PREPARED_ACTION_AUTHORIZATION_COMMITMENT_VERSION,
     proposalId: input.proposalId,
     quoteId: input.quoteId ?? null,
@@ -66,8 +48,7 @@ export function computePreparedActionAuthorizationCommitment(
     atomic: input.atomic,
     calls: input.calls.map(canonicalCall),
     spendBounds: input.spendBounds.map(canonicalSpendBound)
-  });
-  return keccak256(toHex(canonical));
+  })));
 }
 
 export interface PreparedActionAuthorizationValidationInput {
@@ -78,6 +59,8 @@ export interface PreparedActionAuthorizationValidationInput {
   simulationReceipt?: PreparedActionSimulationReceipt;
   now: string;
   requireSimulationPassed?: boolean;
+  requireFreshMarketDrift?: boolean;
+  maxMarketDriftAgeMs?: number;
 }
 
 export interface PreparedActionAuthorizationValidation {
@@ -90,23 +73,13 @@ export interface PreparedActionAuthorizationValidation {
   simulationEvidenceRefs: string[];
 }
 
-function sameAddress(a: string, b: string): boolean {
-  return a.toLowerCase() === b.toLowerCase();
-}
-
+function sameAddress(a: string, b: string): boolean { return a.toLowerCase() === b.toLowerCase(); }
 function approvalMatchesBound(call: PreparedCall, bound: PreparedSpendBound): boolean {
-  return call.kind === "approval"
-    && call.asset !== undefined
-    && call.spender !== undefined
-    && call.amount !== undefined
-    && sameAddress(call.asset, bound.asset)
-    && sameAddress(call.spender, bound.spender)
-    && call.amount === bound.maxAmount;
+  return call.kind === "approval" && call.asset !== undefined && call.spender !== undefined && call.amount !== undefined
+    && sameAddress(call.asset, bound.asset) && sameAddress(call.spender, bound.spender) && call.amount === bound.maxAmount;
 }
 
-export function validatePreparedActionForAuthorization(
-  input: PreparedActionAuthorizationValidationInput
-): PreparedActionAuthorizationValidation {
+export function validatePreparedActionForAuthorization(input: PreparedActionAuthorizationValidationInput): PreparedActionAuthorizationValidation {
   const reasons: string[] = [];
   const parsed = preparedActionSchema.safeParse(input.action);
   if (!parsed.success) reasons.push("PREPARED_ACTION_SCHEMA_INVALID");
@@ -127,9 +100,8 @@ export function validatePreparedActionForAuthorization(
   if (input.action.evidenceSnapshotRoot !== input.proposal.evidenceSnapshotRoot) reasons.push("EVIDENCE_ROOT_MISMATCH");
 
   if (input.action.quoteId) {
-    if (!input.quote) {
-      reasons.push("QUOTE_CONTEXT_REQUIRED");
-    } else {
+    if (!input.quote) reasons.push("QUOTE_CONTEXT_REQUIRED");
+    else {
       if (input.quote.id !== input.action.quoteId) reasons.push("QUOTE_ID_MISMATCH");
       if (input.quote.proposalId !== input.proposal.id) reasons.push("QUOTE_PROPOSAL_MISMATCH");
       if (input.quote.chainId !== input.action.executionChainId) reasons.push("QUOTE_CHAIN_MISMATCH");
@@ -137,25 +109,16 @@ export function validatePreparedActionForAuthorization(
       const quoteExpiryMs = Date.parse(input.quote.expiresAt);
       if (Number.isFinite(quoteExpiryMs) && quoteExpiryMs < expiresAtMs) reasons.push("ACTION_EXPIRY_EXCEEDS_QUOTE");
     }
-  } else if (input.quote) {
-    reasons.push("UNBOUND_QUOTE_CONTEXT");
-  }
+  } else if (input.quote) reasons.push("UNBOUND_QUOTE_CONTEXT");
 
   if (!input.action.calls.every((call, index) => call.order === index)) reasons.push("CALL_ORDER_INVALID");
-
-  const positiveApprovals = input.action.calls.filter((call) =>
-    call.kind === "approval" && call.amount !== undefined && BigInt(call.amount) > 0n
-  );
+  const positiveApprovals = input.action.calls.filter((call) => call.kind === "approval" && call.amount !== undefined && BigInt(call.amount) > 0n);
   for (const bound of input.action.spendBounds) {
     if (BigInt(bound.maxAmount) <= 0n) continue;
-    if (!positiveApprovals.some((call) => approvalMatchesBound(call, bound))) {
-      reasons.push(`SPEND_BOUND_APPROVAL_MISMATCH:${bound.asset.toLowerCase()}:${bound.spender.toLowerCase()}`);
-    }
+    if (!positiveApprovals.some((call) => approvalMatchesBound(call, bound))) reasons.push(`SPEND_BOUND_APPROVAL_MISMATCH:${bound.asset.toLowerCase()}:${bound.spender.toLowerCase()}`);
   }
   for (const approval of positiveApprovals) {
-    if (!input.action.spendBounds.some((bound) => approvalMatchesBound(approval, bound))) {
-      reasons.push(`UNBOUNDED_POSITIVE_APPROVAL:${approval.asset?.toLowerCase() ?? "unknown"}:${approval.spender?.toLowerCase() ?? "unknown"}`);
-    }
+    if (!input.action.spendBounds.some((bound) => approvalMatchesBound(approval, bound))) reasons.push(`UNBOUNDED_POSITIVE_APPROVAL:${approval.asset?.toLowerCase() ?? "unknown"}:${approval.spender?.toLowerCase() ?? "unknown"}`);
   }
 
   if (input.action.authorizationCommitmentVersion !== PREPARED_ACTION_AUTHORIZATION_COMMITMENT_VERSION) reasons.push("AUTHORIZATION_COMMITMENT_VERSION_MISMATCH");
@@ -166,12 +129,27 @@ export function validatePreparedActionForAuthorization(
   if (input.marketDrift?.drifted) {
     for (const reason of input.marketDrift.reasons) reasons.push(`MARKET_DRIFT:${reason}`);
   }
+  const requireFreshMarketDrift = input.requireFreshMarketDrift ?? false;
+  if (requireFreshMarketDrift) {
+    if (!input.marketDrift) reasons.push("MARKET_DRIFT_RESULT_REQUIRED");
+    else {
+      if (input.marketDrift.priorSnapshotRoot !== input.action.marketSnapshotRoot) reasons.push("MARKET_DRIFT_PRIOR_ROOT_MISMATCH");
+      if (!input.marketDrift.refreshedSnapshotRoot) reasons.push("MARKET_DRIFT_REFRESH_ROOT_REQUIRED");
+      if ((input.marketDrift.evidenceRefs?.length ?? 0) === 0) reasons.push("MARKET_DRIFT_EVIDENCE_REQUIRED");
+      const driftEvaluatedAtMs = Date.parse(input.marketDrift.evaluatedAt);
+      if (!Number.isFinite(driftEvaluatedAtMs)) reasons.push("MARKET_DRIFT_TIME_INVALID");
+      else if (Number.isFinite(nowMs)) {
+        if (driftEvaluatedAtMs > nowMs) reasons.push("MARKET_DRIFT_EVALUATED_IN_FUTURE");
+        const maxAge = input.maxMarketDriftAgeMs ?? DEFAULT_AUTHORIZATION_MAX_MARKET_DRIFT_AGE_MS;
+        if (nowMs - driftEvaluatedAtMs > maxAge) reasons.push("MARKET_DRIFT_RESULT_STALE");
+      }
+    }
+  }
 
   const requireSimulationPassed = input.requireSimulationPassed ?? true;
   if (requireSimulationPassed) {
-    if (!input.simulationReceipt) {
-      reasons.push("SIMULATION_RECEIPT_REQUIRED");
-    } else {
+    if (!input.simulationReceipt) reasons.push("SIMULATION_RECEIPT_REQUIRED");
+    else {
       const simulationValidation = validatePreparedActionSimulationReceipt(input.action, input.simulationReceipt);
       for (const reason of simulationValidation.reasons) reasons.push(reason);
     }
@@ -185,8 +163,6 @@ export function validatePreparedActionForAuthorization(
     recomputedAuthorizationCommitment,
     reasons,
     driftEvidenceRefs: input.marketDrift?.evidenceRefs ?? [],
-    simulationEvidenceRefs: input.simulationReceipt
-      ? [input.simulationReceipt.id, ...input.simulationReceipt.evidenceRefs]
-      : []
+    simulationEvidenceRefs: input.simulationReceipt ? [input.simulationReceipt.id, ...input.simulationReceipt.evidenceRefs] : []
   };
 }
