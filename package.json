@@ -9,9 +9,6 @@
     "test": "pnpm -r test --if-present"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["esbuild"],
-    "overrides": {
-      "@pancakeswap/infinity-stable-sdk@1.0.2": "1.0.1"
-    }
+    "onlyBuiltDependencies": ["esbuild"]
   }
 }
