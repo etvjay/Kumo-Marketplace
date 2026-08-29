@@ -16,3 +16,4 @@ export * from "./pancakeswap-v3-reader.js";
 export * from "./pancakeswap-v3-mint-scanner.js";
 export * from "./pancakeswap-v3-pool-position-scanner.js";
 export * from "./pancakeswap-v3-transaction-preparer.js";
+export * from "./pancakeswap-smart-router-quote-provider.js";
