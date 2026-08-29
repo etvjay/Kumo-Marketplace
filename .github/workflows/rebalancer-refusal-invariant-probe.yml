@@ -1,0 +1,50 @@
+name: Rebalancer Refusal Invariant Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/rebalancer/pancakeswap-v3-transaction-preparer.ts"
+      - "packages/reference-agents/src/rebalancer/shadow-assessment.ts"
+      - "scripts/rebalancer-refusal-invariant-probe.mjs"
+      - ".github/workflows/rebalancer-refusal-invariant-probe.yml"
+  workflow_dispatch:
+
+jobs:
+  refusal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Prove live HOLD cannot prepare execution
+        env:
+          BSC_RPC_URL: https://bsc-rpc.publicnode.com
+          KUMO_EVIDENCE_PATH: evidence/live/rebalancer-refusal-invariant-probe.json
+        run: node scripts/rebalancer-refusal-invariant-probe.mjs
+
+      - name: Upload refusal evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rebalancer-refusal-invariant-${{ github.sha }}
+          path: evidence/live/rebalancer-refusal-invariant-probe.json
+          if-no-files-found: error
+          retention-days: 30
