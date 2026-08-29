@@ -6,11 +6,11 @@ import {
   TradeType
 } from "@pancakeswap/sdk";
 import {
+  PoolType,
   SMART_ROUTER_ADDRESSES,
   SmartRouter,
   SwapRouter
 } from "@pancakeswap/smart-router";
-import { Pool } from "@pancakeswap/v3-sdk";
 import {
   createPublicClient,
   getAddress,
@@ -39,14 +39,15 @@ export interface PancakeSmartRouterQuoteProviderOptions {
 
 /**
  * Produces exact-input swap calldata using PancakeSwap's maintained Smart
- * Router SDK. The known live V3 pool is supplied as the only candidate pool,
- * so this adapter does not depend on a subgraph or infer additional venues.
+ * Router SDK. V3 candidates are discovered by the SDK from onchain state, then
+ * fail-closed filtered to the exact pool already verified by the Rebalancer.
+ * No subgraph pool inventory is trusted for the final route set.
  *
  * The adapter never signs or broadcasts. Router identity is checked against an
  * explicitly accepted address before calldata is returned to PreparedAction.
  */
 export class PancakeSmartRouterQuoteProvider implements PancakeV3SwapQuoteProvider {
-  readonly id = "pancakeswap-smart-router-static-v3-quote-v1";
+  readonly id = "pancakeswap-smart-router-exact-v3-pool-quote-v1";
   private readonly client;
   private readonly expectedRouter: Address;
   private readonly rpcProviderId: string;
@@ -87,21 +88,38 @@ export class PancakeSmartRouterQuoteProvider implements PancakeV3SwapQuoteProvid
       throw new Error(`SMART_ROUTER_IDENTITY_MISMATCH:${sdkRouter}:${this.expectedRouter}`);
     }
 
-    const tokenIn = new Token(ChainId.BSC, getAddress(input.tokenIn), input.tokenInDecimals);
-    const tokenOut = new Token(ChainId.BSC, getAddress(input.tokenOut), input.tokenOutDecimals);
-    const [token0, token1] = tokenIn.sortsBefore(tokenOut)
-      ? [tokenIn, tokenOut]
-      : [tokenOut, tokenIn];
-
-    const pool = new Pool(
-      token0,
-      token1,
-      input.feeTier,
-      input.sqrtPriceX96,
-      input.poolLiquidity,
-      input.currentTick
+    const tokenIn = new Token(
+      ChainId.BSC,
+      getAddress(input.tokenIn),
+      input.tokenInDecimals,
+      "KUMO_IN"
     );
+    const tokenOut = new Token(
+      ChainId.BSC,
+      getAddress(input.tokenOut),
+      input.tokenOutDecimals,
+      "KUMO_OUT"
+    );
+    const requestedPool = getAddress(input.pool);
 
+    const candidates = await SmartRouter.getV3CandidatePools({
+      onChainProvider: () => this.client,
+      currencyA: tokenIn,
+      currencyB: tokenOut
+    });
+    const exactPools = candidates.filter((pool) => getAddress(pool.address) === requestedPool);
+    if (exactPools.length !== 1) {
+      throw new Error(`SMART_ROUTER_EXACT_POOL_NOT_RESOLVED:${requestedPool}:${exactPools.length}`);
+    }
+    const exactPool = exactPools[0];
+    if (exactPool.fee !== input.feeTier) {
+      throw new Error(`SMART_ROUTER_POOL_FEE_MISMATCH:${exactPool.fee}:${input.feeTier}`);
+    }
+
+    // The Rebalancer independently read these values at finalized state. The
+    // router is allowed to re-read current state for a quote, but the action is
+    // still bound to the proposal's market root and must be refreshed before
+    // execution. We intentionally do not overwrite proposal evidence here.
     const quoteProvider = SmartRouter.createQuoteProvider({
       onChainProvider: () => this.client
     });
@@ -110,9 +128,10 @@ export class PancakeSmartRouterQuoteProvider implements PancakeV3SwapQuoteProvid
       gasPriceWei: () => this.client.getGasPrice(),
       maxHops: 1,
       maxSplits: 1,
-      poolProvider: SmartRouter.createStaticPoolProvider([pool]),
+      poolProvider: SmartRouter.createStaticPoolProvider(exactPools),
       quoteProvider,
-      quoterOptimization: true
+      quoterOptimization: true,
+      allowedPoolTypes: [PoolType.V3]
     });
     if (!trade) throw new Error("SMART_ROUTER_NO_ROUTE");
 
@@ -135,7 +154,8 @@ export class PancakeSmartRouterQuoteProvider implements PancakeV3SwapQuoteProvid
       "pancakeswap-smart-router",
       `chain:${ChainId.BSC}`,
       `router:${sdkRouter}`,
-      `pool:${getAddress(input.pool)}`,
+      `pool:${requestedPool}`,
+      `fee:${input.feeTier}`,
       `tokenIn:${getAddress(input.tokenIn)}`,
       `tokenOut:${getAddress(input.tokenOut)}`,
       `amountIn:${input.amountIn.toString()}`,
@@ -157,7 +177,7 @@ export class PancakeSmartRouterQuoteProvider implements PancakeV3SwapQuoteProvid
       routeRef,
       evidenceRefs: [
         `pancakeswap-sdk:smart-router:${sdkRouter}`,
-        `pancakeswap-v3:pool:${getAddress(input.pool)}`,
+        `pancakeswap-v3:pool:${requestedPool}`,
         `bsc:gas-price:${gasPrice.toString()}:${Date.parse(quotedAt)}`
       ]
     };
