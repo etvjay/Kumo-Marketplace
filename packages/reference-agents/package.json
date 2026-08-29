@@ -16,8 +16,7 @@
     "@kumo/shared": "workspace:*",
     "@pancakeswap/sdk": "^5.9.1",
     "@pancakeswap/smart-router": "^7.7.0",
-    "@pancakeswap/v3-sdk": "^3.10.1",
-    "viem": "^2.37.5",
+    "viem": "2.37.13",
     "zod": "^3.24.2"
   },
   "devDependencies": {
