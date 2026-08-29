@@ -7,7 +7,8 @@
     "build": "pnpm -r build",
     "typecheck": "pnpm -r typecheck",
     "test": "pnpm -r test --if-present",
-    "altana:wallet-preflight": "node scripts/altana-wallet-preflight.mjs"
+    "altana:wallet-preflight": "node scripts/altana-wallet-preflight.mjs",
+    "rebalancer:stateful-canary": "node scripts/rebalancer-stateful-canary.mjs"
   },
   "pnpm": {
     "onlyBuiltDependencies": ["esbuild"]
