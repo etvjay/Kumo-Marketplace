@@ -3,9 +3,11 @@ import {
   type ExecutableQuote,
   type MarketDriftResult,
   type PreparedAction,
+  type PreparedCall,
   type PreparedSpendBound,
   type StrategyProposal
 } from "@kumo/financial-agent-kernel";
+import { toFunctionSelector } from "viem";
 
 export const ALTANA_SDK_PROFILE = {
   package: "@altananetwork/sdk",
@@ -15,6 +17,7 @@ export const ALTANA_SDK_PROFILE = {
 
 export interface AltanaCallPermission {
   to: string;
+  signature: string;
 }
 
 export interface AltanaSpendPermission {
@@ -24,7 +27,7 @@ export interface AltanaSpendPermission {
 }
 
 export interface AltanaSessionBlueprint {
-  schemaVersion: "kumo-altana-session-blueprint-v1";
+  schemaVersion: "kumo-altana-session-blueprint-v2";
   walletAddress: string;
   authorizationCommitment: string;
   authorizationCommitmentVersion: string;
@@ -34,12 +37,24 @@ export interface AltanaSessionBlueprint {
     calls: AltanaCallPermission[];
     spend: AltanaSpendPermission[];
   };
-  scopeStrength: "TARGET_ALLOWLIST_PLUS_TOKEN_SPEND_CAPS";
+  scopeStrength: "TARGET_AND_FUNCTION_ALLOWLIST_PLUS_TOKEN_SPEND_CAPS";
   sourceActionId: string;
   sourceProposalId: string;
   sourceQuoteId?: string;
   limitations: string[];
 }
+
+const REBALANCER_FUNCTION_SIGNATURES = [
+  "approve(address,uint256)",
+  "decreaseLiquidity((uint256,uint128,uint256,uint256,uint256))",
+  "collect((uint256,address,uint128,uint128))",
+  "mint((address,address,uint24,int24,int24,uint256,uint256,uint256,uint256,address,uint256))",
+  "exactInputSingle((address,address,uint24,address,uint256,uint256,uint256,uint160))"
+] as const;
+
+const REBALANCER_SELECTOR_TO_SIGNATURE = new Map<string, string>(
+  REBALANCER_FUNCTION_SIGNATURES.map((signature) => [toFunctionSelector(signature).toLowerCase(), signature])
+);
 
 function sameAddress(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
@@ -59,23 +74,37 @@ function aggregateSpend(bounds: PreparedSpendBound[]): AltanaSpendPermission[] {
     .map((entry) => ({ token: entry.token, limit: entry.total, period: "minute" as const }));
 }
 
-function uniqueCallTargets(action: PreparedAction): AltanaCallPermission[] {
-  const seen = new Map<string, string>();
+function functionSignatureForCall(call: PreparedCall): string {
+  if (call.data.length < 10) throw new Error(`ALTANA_CALL_SELECTOR_MISSING:${call.order}`);
+  const selector = call.data.slice(0, 10).toLowerCase();
+  const signature = REBALANCER_SELECTOR_TO_SIGNATURE.get(selector);
+  if (!signature) throw new Error(`ALTANA_UNRECOGNIZED_CALL_SELECTOR:${call.order}:${selector}`);
+  return signature;
+}
+
+function exactCallPermissions(action: PreparedAction): AltanaCallPermission[] {
+  const seen = new Map<string, AltanaCallPermission>();
   for (const call of action.calls) {
-    const key = call.to.toLowerCase();
-    if (!seen.has(key)) seen.set(key, call.to);
+    const permission = {
+      to: call.to,
+      signature: functionSignatureForCall(call)
+    };
+    const key = `${permission.to.toLowerCase()}|${permission.signature}`;
+    if (!seen.has(key)) seen.set(key, permission);
   }
-  return [...seen.values()]
-    .sort((a, b) => a.toLowerCase().localeCompare(b.toLowerCase()))
-    .map((to) => ({ to }));
+  return [...seen.values()].sort((a, b) => {
+    const targetOrder = a.to.toLowerCase().localeCompare(b.to.toLowerCase());
+    return targetOrder !== 0 ? targetOrder : a.signature.localeCompare(b.signature);
+  });
 }
 
 /**
- * Translate a Kumo PreparedAction into an Altana session request profile.
+ * Translate a Kumo PreparedAction into the narrowest currently supported
+ * Altana session profile: exact target + function signature permissions,
+ * per-token spend caps and the PreparedAction expiry.
  *
- * The Kumo action remains authoritative. Altana is the enforcement/transport
- * layer. This function refuses to produce a grant profile unless the action is
- * already authorization-eligible and the action signer is the Altana wallet.
+ * Kumo remains the authority-policy source. Altana is the on-chain enforcement
+ * layer. Unknown selectors fail closed and no grant profile is produced.
  */
 export function buildAltanaSessionBlueprint(input: {
   action: PreparedAction;
@@ -109,11 +138,11 @@ export function buildAltanaSessionBlueprint(input: {
   const expiry = Math.floor(expiryMs / 1000);
   if (expiry <= Math.floor(Date.parse(input.now) / 1000)) throw new Error("ALTANA_ACTION_ALREADY_EXPIRED");
 
-  const calls = uniqueCallTargets(input.action);
+  const calls = exactCallPermissions(input.action);
   if (calls.length === 0) throw new Error("ALTANA_CALL_ALLOWLIST_EMPTY");
 
   return {
-    schemaVersion: "kumo-altana-session-blueprint-v1",
+    schemaVersion: "kumo-altana-session-blueprint-v2",
     walletAddress: input.altanaWalletAddress,
     authorizationCommitment: input.action.authorizationCommitment,
     authorizationCommitmentVersion: input.action.authorizationCommitmentVersion,
@@ -123,13 +152,13 @@ export function buildAltanaSessionBlueprint(input: {
       calls,
       spend: aggregateSpend(input.action.spendBounds)
     },
-    scopeStrength: "TARGET_ALLOWLIST_PLUS_TOKEN_SPEND_CAPS",
+    scopeStrength: "TARGET_AND_FUNCTION_ALLOWLIST_PLUS_TOKEN_SPEND_CAPS",
     sourceActionId: input.action.id,
     sourceProposalId: input.action.proposalId,
     ...(input.action.quoteId ? { sourceQuoteId: input.action.quoteId } : {}),
     limitations: [
       "This blueprint does not grant a session; it is deterministic input for Altana grantSession.",
-      "Altana call permissions are target-level in this profile. Exact calldata remains bound by Kumo's authorization commitment but is not yet method-selector-enforced by the session profile.",
+      "Altana enforces target + function signature permissions; Kumo's authorization commitment separately binds the exact calldata arguments and ordered calls.",
       "Token spend caps conservatively sum Kumo spend bounds per token over Altana's minimum rolling period of one minute.",
       "The session must be KeyStore-registered; register=false is not permitted for hackathon evidence.",
       "The Altana wallet must own or control the consequential assets referenced by the PreparedAction before live execution."

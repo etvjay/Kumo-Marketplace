@@ -1,4 +1,7 @@
 import fs from "node:fs/promises";
+import {
+  computePreparedActionAuthorizationCommitment
+} from "../packages/financial-agent-kernel/dist/index.js";
 import { buildAltanaSessionBlueprint, grantAltanaAuthority } from "../packages/adapters/dist/index.js";
 
 const evidencePath = process.env.KUMO_EVIDENCE_PATH || "evidence/fixtures/rebalancer-prepared-action.json";
@@ -8,58 +11,50 @@ if (!baseAction) throw new Error("PREPARED_ACTION_FIXTURE_REQUIRED");
 
 const action = { ...baseAction, simulationStatus: "PASSED" };
 const proposal = {
-  id: action.proposalId,
-  agentId: "kumo-rebalancer-reference-bsc-v1",
-  category: "rebalancing",
-  mode: "shadow",
-  createdAt: "2026-08-29T04:59:59.000Z",
-  expiresAt: "2026-08-29T05:00:20.000Z",
-  objective: "TEST FIXTURE",
-  action: "TEST FIXTURE",
-  disposition: "propose",
-  rationale: "TEST FIXTURE",
-  expectedNetBenefit: 5,
-  estimatedCost: 1,
-  evidencePacketRef: "fixture:evidence",
-  evidenceSnapshotRoot: action.evidenceSnapshotRoot,
-  marketSnapshotRoot: action.marketSnapshotRoot,
-  refusalReasons: []
+  id: action.proposalId, agentId: "kumo-rebalancer-reference-bsc-v1", category: "rebalancing", mode: "shadow",
+  createdAt: "2026-08-29T04:59:59.000Z", expiresAt: "2026-08-29T05:00:20.000Z", objective: "TEST FIXTURE",
+  action: "TEST FIXTURE", disposition: "propose", rationale: "TEST FIXTURE", expectedNetBenefit: 5, estimatedCost: 1,
+  evidencePacketRef: "fixture:evidence", evidenceSnapshotRoot: action.evidenceSnapshotRoot,
+  marketSnapshotRoot: action.marketSnapshotRoot, refusalReasons: []
 };
 const quote = {
-  id: action.quoteId,
-  proposalId: action.proposalId,
-  quotedAt: action.createdAt,
-  expiresAt: action.expiresAt,
-  chainId: 56,
-  venue: "pancakeswap-v3",
-  totalCost: 1,
-  slippageBps: 5,
-  marketSnapshotRoot: action.marketSnapshotRoot
+  id: action.quoteId, proposalId: action.proposalId, quotedAt: action.createdAt, expiresAt: action.expiresAt,
+  chainId: 56, venue: "pancakeswap-v3", totalCost: 1, slippageBps: 5, marketSnapshotRoot: action.marketSnapshotRoot
 };
 const marketDrift = { drifted: false, reasons: [], evidenceRefs: ["fixture:semantic-refresh:pass"] };
 const now = "2026-08-29T05:00:01.000Z";
 
-const blueprint = buildAltanaSessionBlueprint({
-  action,
-  proposal,
-  quote,
-  marketDrift,
-  now,
-  altanaWalletAddress: action.signer
-});
+const blueprint = buildAltanaSessionBlueprint({ action, proposal, quote, marketDrift, now, altanaWalletAddress: action.signer });
 
 let ownershipRejected = false;
 try {
+  buildAltanaSessionBlueprint({ action, proposal, quote, marketDrift, now, altanaWalletAddress: "0x0000000000000000000000000000000000000001" });
+} catch (error) {
+  ownershipRejected = error instanceof Error && error.message === "ALTANA_WALLET_DOES_NOT_OWN_PREPARED_ACTION";
+}
+
+let unknownSelectorRejected = false;
+let unknownSelectorReason;
+try {
+  const selectorMutatedBase = {
+    ...action,
+    calls: action.calls.map((call, index) => index === 0 ? { ...call, data: "0xdeadbeef" } : call)
+  };
+  const selectorMutated = {
+    ...selectorMutatedBase,
+    authorizationCommitment: computePreparedActionAuthorizationCommitment(selectorMutatedBase)
+  };
   buildAltanaSessionBlueprint({
-    action,
+    action: selectorMutated,
     proposal,
     quote,
     marketDrift,
     now,
-    altanaWalletAddress: "0x0000000000000000000000000000000000000001"
+    altanaWalletAddress: action.signer
   });
 } catch (error) {
-  ownershipRejected = error instanceof Error && error.message === "ALTANA_WALLET_DOES_NOT_OWN_PREPARED_ACTION";
+  unknownSelectorReason = error instanceof Error ? error.message : String(error);
+  unknownSelectorRejected = unknownSelectorReason.startsWith("ALTANA_UNRECOGNIZED_CALL_SELECTOR:");
 }
 
 const fakePort = {
@@ -74,14 +69,16 @@ const fakePort = {
   }
 };
 const receipt = await grantAltanaAuthority({ blueprint, port: fakePort });
-const callTargetsUnique = new Set(blueprint.permissions.calls.map((item) => item.to.toLowerCase())).size === blueprint.permissions.calls.length;
+const unique = new Set(blueprint.permissions.calls.map((item) => `${item.to.toLowerCase()}|${item.signature}`));
+const callPermissionsUnique = unique.size === blueprint.permissions.calls.length;
+const everyCallMethodScoped = blueprint.permissions.calls.every((item) => item.signature.includes("("));
 const spendPositive = blueprint.permissions.spend.every((item) => item.limit > 0n && item.period === "minute");
 const registered = blueprint.register === true && receipt.registeredInKeyStore === true;
 const commitmentBound = receipt.authorizationCommitment === action.authorizationCommitment;
-const passed = ownershipRejected && callTargetsUnique && spendPositive && registered && commitmentBound;
+const passed = ownershipRejected && callPermissionsUnique && everyCallMethodScoped && spendPositive && registered && commitmentBound && unknownSelectorRejected;
 
 console.log(JSON.stringify({
-  schemaVersion: "kumo-altana-session-blueprint-fixture-v1",
+  schemaVersion: "kumo-altana-session-blueprint-fixture-v2",
   classification: "TEST_FIXTURE_NOT_LIVE_ALTANA_EVIDENCE",
   status: passed ? "ALTANA_SESSION_BLUEPRINT_FIXTURE_PASS" : "ALTANA_SESSION_BLUEPRINT_FIXTURE_FAIL",
   blueprint: {
@@ -92,6 +89,7 @@ console.log(JSON.stringify({
     }
   },
   receipt,
-  invariants: { ownershipRejected, callTargetsUnique, spendPositive, registered, commitmentBound, passed }
+  unknownSelectorReason,
+  invariants: { ownershipRejected, unknownSelectorRejected, callPermissionsUnique, everyCallMethodScoped, spendPositive, registered, commitmentBound, passed }
 }, null, 2));
 if (!passed) process.exitCode = 1;
