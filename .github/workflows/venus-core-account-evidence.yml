@@ -1,0 +1,54 @@
+name: Venus Core Account Evidence
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/health/**"
+      - "scripts/venus-core-account-evidence.mjs"
+      - ".github/workflows/venus-core-account-evidence.yml"
+  workflow_dispatch:
+    inputs:
+      account:
+        description: "Public Venus Core account to verify"
+        required: false
+        default: "0xD5c77E7a1d45D684717178B765c5bec82F51166E"
+      discovery_ref:
+        description: "Public discovery evidence reference"
+        required: false
+        default: "bscscan:tx:0x756cde52d335cc669bdc67fb3b81a5afcbbd22e00c7a6cf13bc0cde00b371047"
+
+jobs:
+  evidence:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+      - name: Build workspace
+        run: pnpm build
+      - name: Verify public Venus Core borrower against finalized BSC state
+        env:
+          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          VENUS_EVIDENCE_ACCOUNT: ${{ inputs.account || '0xD5c77E7a1d45D684717178B765c5bec82F51166E' }}
+          VENUS_ACCOUNT_DISCOVERY_REF: ${{ inputs.discovery_ref || 'bscscan:tx:0x756cde52d335cc669bdc67fb3b81a5afcbbd22e00c7a6cf13bc0cde00b371047' }}
+          KUMO_EVIDENCE_PATH: evidence/live/venus-core-account-evidence.json
+        run: node scripts/venus-core-account-evidence.mjs
+      - name: Upload public account evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-core-account-evidence-${{ github.sha }}
+          path: evidence/live/venus-core-account-evidence.json
+          if-no-files-found: error
+          retention-days: 30
