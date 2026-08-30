@@ -1,0 +1,55 @@
+name: Venus Health Guard Shadow Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/health/**"
+      - "scripts/venus-health-shadow-probe.mjs"
+      - ".github/workflows/venus-health-shadow-probe.yml"
+  workflow_dispatch:
+    inputs:
+      account:
+        description: "Public Venus Core account to evaluate in shadow mode"
+        required: false
+        default: "0x9FBd07c1db2a93b1BB079C6c958DF374EF93fFd9"
+
+jobs:
+  shadow:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Produce live read-only Health Guard shadow decision
+        env:
+          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          VENUS_HEALTH_SHADOW_ACCOUNT: ${{ inputs.account || '0x9FBd07c1db2a93b1BB079C6c958DF374EF93fFd9' }}
+          KUMO_EVIDENCE_PATH: evidence/live/venus-health-shadow-probe.json
+        run: node scripts/venus-health-shadow-probe.mjs
+
+      - name: Upload Health Guard shadow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-health-shadow-probe-${{ github.sha }}
+          path: evidence/live/venus-health-shadow-probe.json
+          if-no-files-found: error
+          retention-days: 30
