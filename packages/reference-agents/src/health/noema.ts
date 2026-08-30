@@ -11,6 +11,20 @@ import {
 import { assessVenusHealthState, type VenusHealthPositionState } from "./cognition.js";
 import type { VenusCoreAccountState } from "./types.js";
 
+export interface VenusLendingMarketRiskState {
+  vToken: string;
+  enteredAsCollateralMarket: boolean;
+  hasLiveSupply: boolean;
+  hasCurrentDebt: boolean;
+  baseCollateralFactorMantissa: string;
+  baseLiquidationThresholdMantissa: string;
+  baseLiquidationIncentiveMantissa: string;
+  effectiveCollateralFactorMantissa: string;
+  effectiveLiquidationThresholdMantissa: string;
+  effectiveLiquidationIncentiveMantissa: string;
+  differsFromBasePolicy: boolean;
+}
+
 export interface VenusLendingPositionEconomicState {
   chainId: 56;
   protocol: "venus-core";
@@ -22,12 +36,34 @@ export interface VenusLendingPositionEconomicState {
   debtMarketCount: number;
   enteredMarketCount: number;
   listedMarketCount: number;
+  accountEffectivePolicyObserved: true;
+  differentiatedRiskPolicyMarketCount: number;
+  marketRisk: VenusLendingMarketRiskState[];
   finalizedBlockNumber: string;
   finalizedBlockHash: string;
 }
 
 function claim(input: NoemaAgentClaim): NoemaAgentClaim {
   return input;
+}
+
+function toMarketRisk(state: VenusCoreAccountState): VenusLendingMarketRiskState[] {
+  return state.activeMarkets.map((market) => ({
+    vToken: market.vToken,
+    enteredAsCollateralMarket: market.enteredAsCollateralMarket,
+    hasLiveSupply: market.vTokenBalance > 0n,
+    hasCurrentDebt: market.borrowBalance > 0n,
+    baseCollateralFactorMantissa: market.baseCollateralFactorMantissa.toString(),
+    baseLiquidationThresholdMantissa: market.baseLiquidationThresholdMantissa.toString(),
+    baseLiquidationIncentiveMantissa: market.baseLiquidationIncentiveMantissa.toString(),
+    effectiveCollateralFactorMantissa: market.effectiveCollateralFactorMantissa.toString(),
+    effectiveLiquidationThresholdMantissa: market.effectiveLiquidationThresholdMantissa.toString(),
+    effectiveLiquidationIncentiveMantissa: market.effectiveLiquidationIncentiveMantissa.toString(),
+    differsFromBasePolicy:
+      market.baseCollateralFactorMantissa !== market.effectiveCollateralFactorMantissa
+      || market.baseLiquidationThresholdMantissa !== market.effectiveLiquidationThresholdMantissa
+      || market.baseLiquidationIncentiveMantissa !== market.effectiveLiquidationIncentiveMantissa
+  }));
 }
 
 export function buildVenusLendingPositionEconomicObject(input: {
@@ -41,6 +77,8 @@ export function buildVenusLendingPositionEconomicObject(input: {
   if (!Number.isFinite(observedAt)) throw new Error(`VENUS_NOEMA_INVALID_OBSERVED_AT:${state.snapshot.observedAt}`);
 
   const assessment = assessVenusHealthState(state);
+  const marketRisk = toMarketRisk(state);
+  const differentiatedRiskPolicyMarketCount = marketRisk.filter((market) => market.differsFromBasePolicy).length;
   const objectId = `noema:venus-lending-position:${state.chainId}:${state.account.toLowerCase()}`;
   const chainEvidenceId = `${objectId}:evidence:block:${state.snapshot.blockNumber}`;
   const accountEvidenceId = `${objectId}:evidence:account:${state.snapshot.blockNumber}`;
@@ -90,7 +128,10 @@ export function buildVenusLendingPositionEconomicObject(input: {
         enteredMarketCount: state.enteredMarkets.length,
         listedMarketCount: state.listedMarketCount,
         liveCollateralMarketCount: assessment.liveCollateralMarketCount,
-        debtMarketCount: assessment.debtMarketCount
+        debtMarketCount: assessment.debtMarketCount,
+        accountEffectivePolicyObserved: true,
+        differentiatedRiskPolicyMarketCount,
+        marketRisk
       }
     }
   ];
@@ -168,13 +209,45 @@ export function buildVenusLendingPositionEconomicObject(input: {
       confidence: 1,
       observedAt,
       createdAt: evaluatedAt
+    }),
+    claim({
+      id: `${objectId}:claim:effectiveRiskPolicyObserved`,
+      subject: objectId,
+      property: "risk.accountEffectivePolicyObserved",
+      value: true,
+      state: "VERIFIED",
+      sourceRefs: [
+        `venus-core:${state.comptroller}:getEffectiveLtvFactor`,
+        `venus-core:${state.comptroller}:getEffectiveLiquidationIncentive`
+      ],
+      evidenceRefs: [marketEvidenceId],
+      confidence: 1,
+      observedAt,
+      createdAt: evaluatedAt
+    }),
+    claim({
+      id: `${objectId}:claim:differentiatedRiskPolicyMarketCount`,
+      subject: objectId,
+      property: "risk.differentiatedPolicyMarketCount",
+      value: differentiatedRiskPolicyMarketCount,
+      state: "VERIFIED",
+      sourceRefs: ["rule:kumo-venus-effective-vs-base-policy-v1"],
+      evidenceRefs: [marketEvidenceId],
+      confidence: 1,
+      observedAt,
+      createdAt: evaluatedAt
     })
   ];
 
   const finalized = state.snapshot.blockTag === "finalized";
   const liquidityReadSucceeded = state.liquidityError === 0n;
   const sameChain = state.chainId === 56 && state.snapshot.chainId === 56;
-  const verificationStatus = finalized && liquidityReadSucceeded && sameChain ? "PASS" : "FAIL";
+  const effectiveRiskComplete = state.activeMarkets.every((market) =>
+    market.effectiveCollateralFactorMantissa >= 0n
+    && market.effectiveLiquidationThresholdMantissa >= market.effectiveCollateralFactorMantissa
+    && market.effectiveLiquidationIncentiveMantissa > 0n
+  );
+  const verificationStatus = finalized && liquidityReadSucceeded && sameChain && effectiveRiskComplete ? "PASS" : "FAIL";
 
   return {
     id: objectId,
@@ -197,6 +270,9 @@ export function buildVenusLendingPositionEconomicObject(input: {
       debtMarketCount: assessment.debtMarketCount,
       enteredMarketCount: state.enteredMarkets.length,
       listedMarketCount: state.listedMarketCount,
+      accountEffectivePolicyObserved: true,
+      differentiatedRiskPolicyMarketCount,
+      marketRisk,
       finalizedBlockNumber: state.snapshot.blockNumber,
       finalizedBlockHash: state.snapshot.blockHash
     },
@@ -204,7 +280,7 @@ export function buildVenusLendingPositionEconomicObject(input: {
     evidence,
     verification: {
       status: verificationStatus,
-      verifierVersion: "kumo-venus-noema-verifier-v1",
+      verifierVersion: "kumo-venus-noema-verifier-v2",
       checks: [
         {
           id: `${objectId}:check:finalized`,
@@ -234,6 +310,15 @@ export function buildVenusLendingPositionEconomicObject(input: {
           evidenceRefs: [chainEvidenceId],
           ruleVersion: "1",
           timestamp: evaluatedAt
+        },
+        {
+          id: `${objectId}:check:effective-risk`,
+          type: "VENUS_ACCOUNT_EFFECTIVE_RISK_POLICY_COMPLETE",
+          subject: objectId,
+          result: effectiveRiskComplete ? "PASS" : "FAIL",
+          evidenceRefs: [marketEvidenceId],
+          ruleVersion: "1",
+          timestamp: evaluatedAt
         }
       ]
     },
@@ -251,20 +336,22 @@ export function buildVenusHealthMandate(input: {
     id: `noema-mandate:venus-health:${input.principal}`,
     version: 1,
     principal: input.principal,
-    objective: "Assess the current Venus Core lending position from finalized onchain state before any health or rescue decision.",
+    objective: "Assess the current Venus Core lending position from finalized onchain state and account-effective risk policy before any health or rescue decision.",
     economicObjectType: "VENUS_CORE_LENDING_POSITION",
     requiredClaims: [
       { property: "position.state", acceptedStates: ["VERIFIED"] },
       { property: "venus.accountLiquidityMantissa", acceptedStates: ["VERIFIED"] },
       { property: "venus.accountShortfallMantissa", acceptedStates: ["VERIFIED"] },
       { property: "position.liveCollateralMarketCount", acceptedStates: ["VERIFIED"] },
-      { property: "position.debtMarketCount", acceptedStates: ["VERIFIED"] }
+      { property: "position.debtMarketCount", acceptedStates: ["VERIFIED"] },
+      { property: "risk.accountEffectivePolicyObserved", acceptedStates: ["VERIFIED"] }
     ],
     maxEvidenceAgeMs: input.maxEvidenceAgeMs ?? 60_000,
     constraints: {
       chainId: 56,
       protocol: "venus-core",
       finalizedStateRequired: true,
+      accountEffectiveRiskPolicyRequired: true,
       genericHealthFactorAllowed: false
     }
   };
