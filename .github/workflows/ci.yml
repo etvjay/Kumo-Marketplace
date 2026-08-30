@@ -32,3 +32,6 @@ jobs:
 
       - name: Verify Venus health cognition lattice
         run: node scripts/venus-health-cognition-fixture.mjs
+
+      - name: Verify Venus Health Guard strategy
+        run: node scripts/venus-health-strategy-fixture.mjs
