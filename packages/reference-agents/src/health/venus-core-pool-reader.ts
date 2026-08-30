@@ -10,6 +10,9 @@ const BSC = {
   rpcUrls: { default: { http: [] as string[] } }
 } as const;
 
+const USE_COLLATERAL_FACTOR = 0;
+const USE_LIQUIDATION_THRESHOLD = 1;
+
 const COMPTROLLER_ABI = [
   {
     type: "function", name: "getAccountLiquidity", stateMutability: "view",
@@ -39,6 +42,20 @@ const COMPTROLLER_ABI = [
   {
     type: "function", name: "getLiquidationIncentive", stateMutability: "view",
     inputs: [{ name: "vToken", type: "address" }], outputs: [{ name: "incentive", type: "uint256" }]
+  },
+  {
+    type: "function", name: "getEffectiveLtvFactor", stateMutability: "view",
+    inputs: [
+      { name: "account", type: "address" },
+      { name: "vToken", type: "address" },
+      { name: "weightingStrategy", type: "uint8" }
+    ],
+    outputs: [{ name: "factor", type: "uint256" }]
+  },
+  {
+    type: "function", name: "getEffectiveLiquidationIncentive", stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }, { name: "vToken", type: "address" }],
+    outputs: [{ name: "incentive", type: "uint256" }]
   }
 ] as const;
 
@@ -80,7 +97,7 @@ interface RawMarketSnapshot {
 }
 
 export class VenusCorePoolReader {
-  readonly id = "kumo-venus-core-pool-reader-v2";
+  readonly id = "kumo-venus-core-pool-reader-v3";
   private readonly client;
   private readonly rpcProviderId: string;
   private readonly purpose: ObservationPurpose;
@@ -159,12 +176,24 @@ export class VenusCorePoolReader {
 
     const activeMarkets = await Promise.all(relevantMarkets.map(async (market): Promise<VenusCoreMarketAccountSnapshot> => {
       if (market.snapshotError !== 0n) throw new Error(`VENUS_MARKET_SNAPSHOT_ERROR:${market.vToken}:${market.snapshotError.toString()}`);
-      const [underlyingPriceMantissa, isListed, baseCollateralFactorMantissa, baseLiquidationThresholdMantissa, baseLiquidationIncentiveMantissa] = await Promise.all([
+      const [
+        underlyingPriceMantissa,
+        isListed,
+        baseCollateralFactorMantissa,
+        baseLiquidationThresholdMantissa,
+        baseLiquidationIncentiveMantissa,
+        effectiveCollateralFactorMantissa,
+        effectiveLiquidationThresholdMantissa,
+        effectiveLiquidationIncentiveMantissa
+      ] = await Promise.all([
         this.client.readContract({ address: resilientOracle, abi: ORACLE_ABI, functionName: "getUnderlyingPrice", args: [market.vToken], blockNumber }),
         this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "isMarketListed", args: [market.vToken], blockNumber }),
         this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getCollateralFactor", args: [market.vToken], blockNumber }),
         this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getLiquidationThreshold", args: [market.vToken], blockNumber }),
-        this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getLiquidationIncentive", args: [market.vToken], blockNumber })
+        this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getLiquidationIncentive", args: [market.vToken], blockNumber }),
+        this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getEffectiveLtvFactor", args: [account, market.vToken, USE_COLLATERAL_FACTOR], blockNumber }),
+        this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getEffectiveLtvFactor", args: [account, market.vToken, USE_LIQUIDATION_THRESHOLD], blockNumber }),
+        this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getEffectiveLiquidationIncentive", args: [account, market.vToken], blockNumber })
       ]);
       if (underlyingPriceMantissa <= 0n) throw new Error(`VENUS_MARKET_PRICE_INVALID:${market.vToken}`);
       return {
@@ -173,7 +202,10 @@ export class VenusCorePoolReader {
         underlyingPriceMantissa,
         baseCollateralFactorMantissa,
         baseLiquidationThresholdMantissa,
-        baseLiquidationIncentiveMantissa
+        baseLiquidationIncentiveMantissa,
+        effectiveCollateralFactorMantissa,
+        effectiveLiquidationThresholdMantissa,
+        effectiveLiquidationIncentiveMantissa
       };
     }));
 
@@ -184,7 +216,8 @@ export class VenusCorePoolReader {
       `venus:account-liquidity:${account}:block:${snapshot.blockNumber}`,
       ...activeMarkets.flatMap((market) => [
         `venus:market-snapshot:${market.vToken}:${account}:block:${snapshot.blockNumber}`,
-        `venus:base-risk:${market.vToken}:cf:${market.baseCollateralFactorMantissa.toString()}:lt:${market.baseLiquidationThresholdMantissa.toString()}:li:${market.baseLiquidationIncentiveMantissa.toString()}:block:${snapshot.blockNumber}`
+        `venus:base-risk:${market.vToken}:cf:${market.baseCollateralFactorMantissa.toString()}:lt:${market.baseLiquidationThresholdMantissa.toString()}:li:${market.baseLiquidationIncentiveMantissa.toString()}:block:${snapshot.blockNumber}`,
+        `venus:effective-risk:${market.vToken}:${account}:cf:${market.effectiveCollateralFactorMantissa.toString()}:lt:${market.effectiveLiquidationThresholdMantissa.toString()}:li:${market.effectiveLiquidationIncentiveMantissa.toString()}:block:${snapshot.blockNumber}`
       ])
     ];
 
@@ -204,7 +237,7 @@ export class VenusCorePoolReader {
       evidenceRefs,
       limitations: [
         "Venus-native accountLiquidity/accountShortfall are preserved as the primary solvency facts; no generic health factor is asserted.",
-        "baseCollateralFactor/baseLiquidationThreshold/baseLiquidationIncentive are Core Pool configured values. They are not labeled account-effective values for e-mode or another selected pool.",
+        "Base and account-effective collateral factor, liquidation threshold, and liquidation incentive are kept as separate onchain facts; effective values reflect the account's selected Venus pool/e-mode policy.",
         "Oracle prices are raw Resilient Oracle getUnderlyingPrice outputs; decimal normalization is intentionally deferred to a derived economic layer.",
         "This adapter is read-only and creates no rescue authority or transaction."
       ]
