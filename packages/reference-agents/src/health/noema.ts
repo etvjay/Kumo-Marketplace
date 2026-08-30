@@ -12,6 +12,7 @@ import { assessVenusHealthState, type VenusHealthPositionState } from "./cogniti
 import type { VenusCoreAccountState } from "./types.js";
 
 export interface VenusLendingMarketRiskState {
+  [key: string]: string | boolean;
   vToken: string;
   enteredAsCollateralMarket: boolean;
   hasLiveSupply: boolean;
