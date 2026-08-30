@@ -29,3 +29,6 @@ jobs:
 
       - name: Typecheck workspace
         run: pnpm typecheck
+
+      - name: Verify Venus health cognition lattice
+        run: node scripts/venus-health-cognition-fixture.mjs
