@@ -1,9 +1,16 @@
 import type { ChainSnapshot } from "@kumo/chain-state";
 
 export type VenusNativeSolvencyStatus = "SOLVENT" | "AT_LIQUIDATION_THRESHOLD" | "LIQUIDATION_ELIGIBLE";
+export type VenusUnderlyingKind = "ERC20" | "NATIVE";
 
 export interface VenusCoreMarketAccountSnapshot {
   vToken: string;
+  vTokenSymbol: string;
+  vTokenDecimals: number;
+  underlyingKind: VenusUnderlyingKind;
+  underlyingAddress: string | null;
+  underlyingSymbol: string;
+  underlyingDecimals: number;
   enteredAsCollateralMarket: boolean;
   isListed: boolean;
   snapshotError: bigint;
