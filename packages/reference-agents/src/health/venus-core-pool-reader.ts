@@ -59,16 +59,26 @@ const COMPTROLLER_ABI = [
   }
 ] as const;
 
-const VTOKEN_ABI = [{
-  type: "function", name: "getAccountSnapshot", stateMutability: "view",
-  inputs: [{ name: "account", type: "address" }],
-  outputs: [
-    { name: "error", type: "uint256" },
-    { name: "vTokenBalance", type: "uint256" },
-    { name: "borrowBalance", type: "uint256" },
-    { name: "exchangeRateMantissa", type: "uint256" }
-  ]
-}] as const;
+const VTOKEN_ABI = [
+  {
+    type: "function", name: "getAccountSnapshot", stateMutability: "view",
+    inputs: [{ name: "account", type: "address" }],
+    outputs: [
+      { name: "error", type: "uint256" },
+      { name: "vTokenBalance", type: "uint256" },
+      { name: "borrowBalance", type: "uint256" },
+      { name: "exchangeRateMantissa", type: "uint256" }
+    ]
+  },
+  { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "string" }] },
+  { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint8" }] },
+  { type: "function", name: "underlying", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "address" }] }
+] as const;
+
+const ERC20_METADATA_ABI = [
+  { type: "function", name: "symbol", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "string" }] },
+  { type: "function", name: "decimals", stateMutability: "view", inputs: [], outputs: [{ name: "", type: "uint8" }] }
+] as const;
 
 const ORACLE_ABI = [{
   type: "function", name: "getUnderlyingPrice", stateMutability: "view",
@@ -97,7 +107,7 @@ interface RawMarketSnapshot {
 }
 
 export class VenusCorePoolReader {
-  readonly id = "kumo-venus-core-pool-reader-v3";
+  readonly id = "kumo-venus-core-pool-reader-v4";
   private readonly client;
   private readonly rpcProviderId: string;
   private readonly purpose: ObservationPurpose;
@@ -134,6 +144,7 @@ export class VenusCorePoolReader {
     const account = getAddress(accountInput);
     const comptroller = getAddress(VENUS_CORE_BSC.comptroller);
     const resilientOracle = getAddress(VENUS_CORE_BSC.resilientOracle);
+    const vBNB = getAddress(VENUS_CORE_BSC.vBNB);
     const { blockNumber, snapshot } = await this.freezeBlock();
 
     const [comptrollerCode, oracleCode, liquidityResult, enteredMarketsRaw, allMarketsRaw] = await Promise.all([
@@ -176,7 +187,10 @@ export class VenusCorePoolReader {
 
     const activeMarkets = await Promise.all(relevantMarkets.map(async (market): Promise<VenusCoreMarketAccountSnapshot> => {
       if (market.snapshotError !== 0n) throw new Error(`VENUS_MARKET_SNAPSHOT_ERROR:${market.vToken}:${market.snapshotError.toString()}`);
+      const nativeUnderlying = market.vToken.toLowerCase() === vBNB.toLowerCase();
       const [
+        vTokenSymbol,
+        vTokenDecimals,
         underlyingPriceMantissa,
         isListed,
         baseCollateralFactorMantissa,
@@ -186,6 +200,8 @@ export class VenusCorePoolReader {
         effectiveLiquidationThresholdMantissa,
         effectiveLiquidationIncentiveMantissa
       ] = await Promise.all([
+        this.client.readContract({ address: market.vToken, abi: VTOKEN_ABI, functionName: "symbol", blockNumber }),
+        this.client.readContract({ address: market.vToken, abi: VTOKEN_ABI, functionName: "decimals", blockNumber }),
         this.client.readContract({ address: resilientOracle, abi: ORACLE_ABI, functionName: "getUnderlyingPrice", args: [market.vToken], blockNumber }),
         this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "isMarketListed", args: [market.vToken], blockNumber }),
         this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getCollateralFactor", args: [market.vToken], blockNumber }),
@@ -196,8 +212,34 @@ export class VenusCorePoolReader {
         this.client.readContract({ address: comptroller, abi: COMPTROLLER_ABI, functionName: "getEffectiveLiquidationIncentive", args: [account, market.vToken], blockNumber })
       ]);
       if (underlyingPriceMantissa <= 0n) throw new Error(`VENUS_MARKET_PRICE_INVALID:${market.vToken}`);
+      if (Number(vTokenDecimals) !== 8) throw new Error(`VENUS_VTOKEN_DECIMALS_UNEXPECTED:${market.vToken}:${String(vTokenDecimals)}`);
+
+      let underlyingAddress: Address | null = null;
+      let underlyingSymbol = "BNB";
+      let underlyingDecimals = 18;
+      if (!nativeUnderlying) {
+        underlyingAddress = getAddress(await this.client.readContract({
+          address: market.vToken,
+          abi: VTOKEN_ABI,
+          functionName: "underlying",
+          blockNumber
+        }));
+        const [symbol, decimals] = await Promise.all([
+          this.client.readContract({ address: underlyingAddress, abi: ERC20_METADATA_ABI, functionName: "symbol", blockNumber }),
+          this.client.readContract({ address: underlyingAddress, abi: ERC20_METADATA_ABI, functionName: "decimals", blockNumber })
+        ]);
+        underlyingSymbol = symbol;
+        underlyingDecimals = Number(decimals);
+      }
+
       return {
         ...market,
+        vTokenSymbol,
+        vTokenDecimals: Number(vTokenDecimals),
+        underlyingKind: nativeUnderlying ? "NATIVE" : "ERC20",
+        underlyingAddress,
+        underlyingSymbol,
+        underlyingDecimals,
         isListed,
         underlyingPriceMantissa,
         baseCollateralFactorMantissa,
@@ -216,6 +258,7 @@ export class VenusCorePoolReader {
       `venus:account-liquidity:${account}:block:${snapshot.blockNumber}`,
       ...activeMarkets.flatMap((market) => [
         `venus:market-snapshot:${market.vToken}:${account}:block:${snapshot.blockNumber}`,
+        `venus:market-metadata:${market.vToken}:${market.vTokenSymbol}:${market.vTokenDecimals}:${market.underlyingKind}:${market.underlyingAddress ?? "BNB"}:${market.underlyingSymbol}:${market.underlyingDecimals}:block:${snapshot.blockNumber}`,
         `venus:base-risk:${market.vToken}:cf:${market.baseCollateralFactorMantissa.toString()}:lt:${market.baseLiquidationThresholdMantissa.toString()}:li:${market.baseLiquidationIncentiveMantissa.toString()}:block:${snapshot.blockNumber}`,
         `venus:effective-risk:${market.vToken}:${account}:cf:${market.effectiveCollateralFactorMantissa.toString()}:lt:${market.effectiveLiquidationThresholdMantissa.toString()}:li:${market.effectiveLiquidationIncentiveMantissa.toString()}:block:${snapshot.blockNumber}`
       ])
@@ -238,6 +281,7 @@ export class VenusCorePoolReader {
       limitations: [
         "Venus-native accountLiquidity/accountShortfall are preserved as the primary solvency facts; no generic health factor is asserted.",
         "Base and account-effective collateral factor, liquidation threshold, and liquidation incentive are kept as separate onchain facts; effective values reflect the account's selected Venus pool/e-mode policy.",
+        "vToken identity, underlying identity, symbols, and decimals are read at the same frozen block. vBNB is explicitly modeled as native BNB with 18 underlying decimals.",
         "Oracle prices are raw Resilient Oracle getUnderlyingPrice outputs; decimal normalization is intentionally deferred to a derived economic layer.",
         "This adapter is read-only and creates no rescue authority or transaction."
       ]
