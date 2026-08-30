@@ -35,3 +35,6 @@ jobs:
 
       - name: Verify Venus Health Guard strategy
         run: node scripts/venus-health-strategy-fixture.mjs
+
+      - name: Verify Venus Noema risk policy semantics
+        run: node scripts/venus-health-noema-risk-fixture.mjs
