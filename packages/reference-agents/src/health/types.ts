@@ -14,6 +14,9 @@ export interface VenusCoreMarketAccountSnapshot {
   baseCollateralFactorMantissa: bigint;
   baseLiquidationThresholdMantissa: bigint;
   baseLiquidationIncentiveMantissa: bigint;
+  effectiveCollateralFactorMantissa: bigint;
+  effectiveLiquidationThresholdMantissa: bigint;
+  effectiveLiquidationIncentiveMantissa: bigint;
 }
 
 export interface VenusCoreAccountState {
