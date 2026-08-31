@@ -1,0 +1,55 @@
+name: Venus Borrower Health Guard Shadow Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/health/**"
+      - "scripts/venus-health-borrower-shadow-probe.mjs"
+      - ".github/workflows/venus-health-borrower-shadow-probe.yml"
+  workflow_dispatch:
+    inputs:
+      account:
+        description: "Public current Venus Core borrower to shadow-evaluate"
+        required: false
+        default: "0x234B55149E4795feE12019692D504cBb1FB6F3b7"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Shadow-evaluate finalized current Venus borrower
+        env:
+          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          VENUS_HEALTH_BORROWER_ACCOUNT: ${{ inputs.account || '0x234B55149E4795feE12019692D504cBb1FB6F3b7' }}
+          KUMO_EVIDENCE_PATH: evidence/live/venus-health-borrower-shadow-probe.json
+        run: node scripts/venus-health-borrower-shadow-probe.mjs
+
+      - name: Upload borrower Health Guard shadow evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-health-borrower-shadow-${{ github.sha }}
+          path: evidence/live/venus-health-borrower-shadow-probe.json
+          if-no-files-found: error
+          retention-days: 30
