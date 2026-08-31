@@ -1,5 +1,6 @@
 import {
   assertVenusNativeLiquidityEquivalent,
+  deriveVenusNativeLiquidationBuffer,
   mulVenusExpMantissas,
   mulVenusExpScalarTruncate,
   reconstructVenusAccountLiquidity
@@ -75,7 +76,7 @@ check(
 check(
   "Exp scalar multiplication truncates",
   mulVenusExpScalarTruncate(1_500_000_000_000_000_000n, 1n) === 1n,
-  { actual: mulVenusExpScalarTruncate(1_500_000_000_000_000_000n, 1n).toString(), expected: "1" }
+  { actual: mulVenusExpScalarTruncate(1_500_000_000_000_000n, 1n).toString(), expected: "1" }
 );
 
 const collateralOnly = reconstructVenusAccountLiquidity(state({
@@ -87,6 +88,15 @@ check("collateral-only reconstruction matches native liquidity", collateralOnly.
   derivedLiquidity: collateralOnly.derivedLiquidity.toString(),
   nativeLiquidity: collateralOnly.nativeLiquidity.toString()
 });
+const collateralOnlyBuffer = deriveVenusNativeLiquidationBuffer(collateralOnly);
+check("collateral-only state asserts no liquidation-distance ratio", collateralOnlyBuffer.state === "NO_DEBT"
+  && collateralOnlyBuffer.thresholdUtilizationBps === 0n
+  && collateralOnlyBuffer.liquidationBufferBpsOfBorrow === null,
+{
+  state: collateralOnlyBuffer.state,
+  thresholdUtilizationBps: collateralOnlyBuffer.thresholdUtilizationBps?.toString() ?? null,
+  liquidationBufferBpsOfBorrow: collateralOnlyBuffer.liquidationBufferBpsOfBorrow?.toString() ?? null
+});
 
 const solventBorrower = reconstructVenusAccountLiquidity(state({
   activeMarkets: [market({ borrowBalance: 50n })],
@@ -97,6 +107,28 @@ check("solvent borrower reconstruction matches native liquidity", solventBorrowe
   derivedLiquidity: solventBorrower.derivedLiquidity.toString(),
   derivedShortfall: solventBorrower.derivedShortfall.toString()
 });
+const solventBuffer = deriveVenusNativeLiquidationBuffer(solventBorrower);
+check("solvent borrower exposes protocol-native threshold utilization", solventBuffer.state === "SOLVENT_WITH_BUFFER"
+  && solventBuffer.thresholdUtilizationBps === 6250n
+  && solventBuffer.liquidationBufferBpsOfBorrow === 6000n,
+{
+  state: solventBuffer.state,
+  thresholdUtilizationBps: solventBuffer.thresholdUtilizationBps?.toString() ?? null,
+  liquidationBufferBpsOfBorrow: solventBuffer.liquidationBufferBpsOfBorrow?.toString() ?? null
+});
+
+const thresholdBorrower = reconstructVenusAccountLiquidity(state({
+  activeMarkets: [market({ borrowBalance: 80n })],
+  accountLiquidity: 0n,
+  accountShortfall: 0n
+}));
+const thresholdBuffer = deriveVenusNativeLiquidationBuffer(thresholdBorrower);
+check("threshold borrower is identified without generic health factor", thresholdBuffer.state === "AT_LIQUIDATION_THRESHOLD"
+  && thresholdBuffer.thresholdUtilizationBps === 10000n,
+{
+  state: thresholdBuffer.state,
+  thresholdUtilizationBps: thresholdBuffer.thresholdUtilizationBps?.toString() ?? null
+});
 
 const liquidatableBorrower = reconstructVenusAccountLiquidity(state({
   activeMarkets: [market({ borrowBalance: 90n })],
@@ -106,6 +138,13 @@ const liquidatableBorrower = reconstructVenusAccountLiquidity(state({
 check("liquidation-eligible reconstruction matches native shortfall", liquidatableBorrower.exactNativeMatch, {
   derivedLiquidity: liquidatableBorrower.derivedLiquidity.toString(),
   derivedShortfall: liquidatableBorrower.derivedShortfall.toString()
+});
+const liquidatableBuffer = deriveVenusNativeLiquidationBuffer(liquidatableBorrower);
+check("liquidation-eligible buffer state follows native shortfall", liquidatableBuffer.state === "LIQUIDATION_ELIGIBLE"
+  && liquidatableBuffer.thresholdUtilizationBps === 11250n,
+{
+  state: liquidatableBuffer.state,
+  thresholdUtilizationBps: liquidatableBuffer.thresholdUtilizationBps?.toString() ?? null
 });
 
 const nonCollateralSupply = reconstructVenusAccountLiquidity(state({
@@ -130,9 +169,22 @@ try {
 }
 check("native mismatch fails closed", mismatchRejected);
 
+let bufferMismatchRejected = false;
+try {
+  const mismatched = reconstructVenusAccountLiquidity(state({
+    activeMarkets: [market({ borrowBalance: 50n })],
+    accountLiquidity: 31n,
+    accountShortfall: 0n
+  }));
+  deriveVenusNativeLiquidationBuffer(mismatched);
+} catch (error) {
+  bufferMismatchRejected = error instanceof Error && error.message === "VENUS_LIQUIDATION_BUFFER_REQUIRES_EXACT_NATIVE_MATCH";
+}
+check("liquidation buffer cannot be derived from non-equivalent reconstruction", bufferMismatchRejected);
+
 const passed = results.every((result) => result.passed);
 console.log(JSON.stringify({
-  schemaVersion: "kumo-venus-liquidity-reconstruction-fixture-v1",
+  schemaVersion: "kumo-venus-liquidity-reconstruction-fixture-v2",
   classification: "TEST_FIXTURE_NOT_LIVE_EVIDENCE",
   passed,
   results
