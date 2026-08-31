@@ -41,3 +41,6 @@ jobs:
 
       - name: Verify Venus native liquidity reconstruction
         run: node scripts/venus-liquidity-reconstruction-fixture.mjs
+
+      - name: Verify Venus repay preparation
+        run: node scripts/venus-repay-preparation-fixture.mjs
