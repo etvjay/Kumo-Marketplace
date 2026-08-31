@@ -2,6 +2,7 @@ import type { VenusCoreAccountState, VenusCoreMarketAccountSnapshot } from "./ty
 
 const EXP_SCALE = 1_000_000_000_000_000_000n;
 const HALF_EXP_SCALE = EXP_SCALE / 2n;
+const BPS_SCALE = 10_000n;
 
 export const VENUS_LIQUIDITY_RECONSTRUCTION_RULE =
   "VENUS_CORE_EFFECTIVE_LIQUIDATION_THRESHOLD_EXP_V1" as const;
@@ -33,6 +34,25 @@ export interface VenusLiquidityReconstruction {
   exactNativeMatch: boolean;
   markets: VenusMarketLiquidityContribution[];
   limitations: string[];
+}
+
+export type VenusLiquidationBufferState =
+  | "NO_DEBT"
+  | "SOLVENT_WITH_BUFFER"
+  | "AT_LIQUIDATION_THRESHOLD"
+  | "LIQUIDATION_ELIGIBLE";
+
+export interface VenusNativeLiquidationBuffer {
+  reconstructionRule: typeof VENUS_LIQUIDITY_RECONSTRUCTION_RULE;
+  state: VenusLiquidationBufferState;
+  sumCollateralMantissa: bigint;
+  sumBorrowPlusEffectsMantissa: bigint;
+  nativeLiquidity: bigint;
+  nativeShortfall: bigint;
+  thresholdUtilizationBps: bigint | null;
+  liquidationBufferBpsOfBorrow: bigint | null;
+  exactNativeMatchRequired: true;
+  interpretation: string;
 }
 
 /**
@@ -151,4 +171,54 @@ export function assertVenusNativeLiquidityEquivalent(state: VenusCoreAccountStat
     );
   }
   return reconstruction;
+}
+
+export function deriveVenusNativeLiquidationBuffer(
+  input: VenusCoreAccountState | VenusLiquidityReconstruction
+): VenusNativeLiquidationBuffer {
+  const reconstruction = "activeMarkets" in input
+    ? assertVenusNativeLiquidityEquivalent(input)
+    : input;
+
+  if (!reconstruction.exactNativeMatch) {
+    throw new Error("VENUS_LIQUIDATION_BUFFER_REQUIRES_EXACT_NATIVE_MATCH");
+  }
+
+  const collateral = reconstruction.sumCollateralMantissa;
+  const borrow = reconstruction.sumBorrowPlusEffectsMantissa;
+  const thresholdUtilizationBps = collateral > 0n
+    ? (borrow * BPS_SCALE) / collateral
+    : null;
+  const liquidationBufferBpsOfBorrow = borrow > 0n && reconstruction.nativeLiquidity > 0n
+    ? (reconstruction.nativeLiquidity * BPS_SCALE) / borrow
+    : null;
+
+  let state: VenusLiquidationBufferState;
+  let interpretation: string;
+  if (borrow === 0n) {
+    state = "NO_DEBT";
+    interpretation = "No current Venus borrow contribution is observed, so liquidation-distance ratios are not asserted.";
+  } else if (reconstruction.nativeShortfall > 0n) {
+    state = "LIQUIDATION_ELIGIBLE";
+    interpretation = "Venus-native shortfall is positive; the account is beyond the effective liquidation threshold.";
+  } else if (reconstruction.nativeLiquidity === 0n) {
+    state = "AT_LIQUIDATION_THRESHOLD";
+    interpretation = "Venus-native liquidity and shortfall are both zero with debt present; the account is at the effective liquidation threshold.";
+  } else {
+    state = "SOLVENT_WITH_BUFFER";
+    interpretation = "Venus-native liquidity is positive with debt present; buffer ratios are derived from exact protocol-denominated collateral and borrow totals.";
+  }
+
+  return {
+    reconstructionRule: reconstruction.rule,
+    state,
+    sumCollateralMantissa: collateral,
+    sumBorrowPlusEffectsMantissa: borrow,
+    nativeLiquidity: reconstruction.nativeLiquidity,
+    nativeShortfall: reconstruction.nativeShortfall,
+    thresholdUtilizationBps,
+    liquidationBufferBpsOfBorrow,
+    exactNativeMatchRequired: true,
+    interpretation
+  };
 }
