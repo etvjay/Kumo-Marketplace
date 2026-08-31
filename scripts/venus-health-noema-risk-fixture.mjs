@@ -14,13 +14,19 @@ function state(overrides = {}) {
     comptroller: "0xfD36E2c2a6789Db23113685031d7F16329158384",
     resilientOracle: "0x6592b5DE802159F3E74B2486b091D11a8256ab8A",
     liquidityError: 0n,
-    accountLiquidity: 100n,
-    accountShortfall: 0n,
+    accountLiquidity: overrides.accountLiquidity ?? 3n,
+    accountShortfall: overrides.accountShortfall ?? 0n,
     nativeSolvencyStatus: "SOLVENT",
     enteredMarkets: [VTOKEN],
     listedMarketCount: 52,
     activeMarkets: [{
       vToken: VTOKEN,
+      vTokenSymbol: "vTEST",
+      vTokenDecimals: 8,
+      underlyingKind: "ERC20",
+      underlyingAddress: "0x00000000000000000000000000000000000000cc",
+      underlyingSymbol: "TEST",
+      underlyingDecimals: 18,
       enteredAsCollateralMarket: true,
       isListed: true,
       snapshotError: 0n,
@@ -66,13 +72,18 @@ function run(name, sourceState) {
       objectStatus: assessment.economicObject.status,
       mandateDecision: assessment.evaluation.decision,
       differentiatedRiskPolicyMarketCount: assessment.economicObject.economics.differentiatedRiskPolicyMarketCount,
-      marketRisk: assessment.economicObject.economics.marketRisk
+      marketRisk: assessment.economicObject.economics.marketRisk,
+      nativeLiquidityExactMatch: assessment.economicObject.economics.nativeLiquidityExactMatch,
+      liquidationBufferState: assessment.economicObject.economics.liquidationBufferState,
+      thresholdUtilizationBps: assessment.economicObject.economics.thresholdUtilizationBps,
+      liquidationBufferBpsOfBorrow: assessment.economicObject.economics.liquidationBufferBpsOfBorrow
     }
   };
 }
 
 const defaultPolicy = run("default-policy", state());
 const differentiatedPolicy = run("differentiated-policy", state({
+  accountLiquidity: 4n,
   market: {
     effectiveCollateralFactorMantissa: 900_000_000_000_000_000n,
     effectiveLiquidationThresholdMantissa: 925_000_000_000_000_000n,
@@ -85,33 +96,45 @@ const invalidEffectivePolicy = run("invalid-effective-policy", state({
     effectiveLiquidationThresholdMantissa: 850_000_000_000_000_000n
   }
 }));
+const nativeMismatch = run("native-liquidity-mismatch", state({ accountLiquidity: 4n }));
 const staleEvidence = run("stale-evidence", state({ observedAt: new Date(NOW - 120_000).toISOString() }));
 
 const invariants = {
   defaultPolicyPasses: defaultPolicy.summary.verification === "PASS"
     && defaultPolicy.summary.objectStatus === "RESOLVED"
     && defaultPolicy.summary.mandateDecision === "ALLOW"
-    && defaultPolicy.summary.differentiatedRiskPolicyMarketCount === 0,
+    && defaultPolicy.summary.differentiatedRiskPolicyMarketCount === 0
+    && defaultPolicy.summary.nativeLiquidityExactMatch === true
+    && defaultPolicy.summary.liquidationBufferState === "SOLVENT_WITH_BUFFER"
+    && defaultPolicy.summary.thresholdUtilizationBps === "6250"
+    && defaultPolicy.summary.liquidationBufferBpsOfBorrow === "6000",
   differentiatedPolicyPreserved: differentiatedPolicy.summary.verification === "PASS"
     && differentiatedPolicy.summary.objectStatus === "RESOLVED"
     && differentiatedPolicy.summary.mandateDecision === "ALLOW"
     && differentiatedPolicy.summary.differentiatedRiskPolicyMarketCount === 1
+    && differentiatedPolicy.summary.nativeLiquidityExactMatch === true
     && differentiatedPolicy.summary.marketRisk[0].effectiveCollateralFactorMantissa === "900000000000000000"
     && differentiatedPolicy.summary.marketRisk[0].effectiveLiquidationThresholdMantissa === "925000000000000000"
     && differentiatedPolicy.summary.marketRisk[0].differsFromBasePolicy === true,
   invalidPolicyFailsClosed: invalidEffectivePolicy.summary.verification === "FAIL"
     && invalidEffectivePolicy.summary.objectStatus === "INSUFFICIENT_EVIDENCE"
     && invalidEffectivePolicy.summary.mandateDecision !== "ALLOW",
+  nativeMismatchFailsClosed: nativeMismatch.summary.nativeLiquidityExactMatch === false
+    && nativeMismatch.summary.liquidationBufferState === null
+    && nativeMismatch.summary.thresholdUtilizationBps === null
+    && nativeMismatch.summary.verification === "FAIL"
+    && nativeMismatch.summary.objectStatus === "INSUFFICIENT_EVIDENCE"
+    && nativeMismatch.summary.mandateDecision !== "ALLOW",
   staleEvidenceNotResolved: staleEvidence.summary.objectStatus === "STALE"
     && staleEvidence.summary.mandateDecision !== "ALLOW"
 };
 const passed = Object.values(invariants).every(Boolean);
 
 console.log(JSON.stringify({
-  schemaVersion: "kumo-venus-health-noema-risk-fixture-v1",
+  schemaVersion: "kumo-venus-health-noema-risk-fixture-v2",
   classification: "TEST_FIXTURE_NOT_LIVE_EVIDENCE",
   passed,
   invariants,
-  cases: [defaultPolicy.summary, differentiatedPolicy.summary, invalidEffectivePolicy.summary, staleEvidence.summary]
+  cases: [defaultPolicy.summary, differentiatedPolicy.summary, invalidEffectivePolicy.summary, nativeMismatch.summary, staleEvidence.summary]
 }, null, 2));
 if (!passed) process.exitCode = 1;
