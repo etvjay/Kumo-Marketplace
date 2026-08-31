@@ -1,0 +1,49 @@
+name: Venus Current Borrower Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/health/**"
+      - "scripts/venus-current-borrower-probe.mjs"
+      - ".github/workflows/venus-current-borrower-probe.yml"
+  workflow_dispatch:
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Promote a finalized current Venus borrower
+        env:
+          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          KUMO_EVIDENCE_PATH: evidence/live/venus-current-borrower-probe.json
+        run: node scripts/venus-current-borrower-probe.mjs
+
+      - name: Upload borrower discovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-current-borrower-probe-${{ github.sha }}
+          path: evidence/live/venus-current-borrower-probe.json
+          if-no-files-found: error
+          retention-days: 30
