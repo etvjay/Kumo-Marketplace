@@ -18,6 +18,8 @@ export interface VenusHealthStrategyProposal {
   sourceObjectId: string;
   sourceObjectVersion: number;
   sourcePositionState: VenusLendingPositionEconomicState["positionState"];
+  sourceFinalizedBlockNumber: string;
+  sourceFinalizedBlockHash: string;
   account: string;
   accountLiquidityMantissa: string;
   accountShortfallMantissa: string;
@@ -45,6 +47,8 @@ function proposal(
     sourceObjectId: assessment.economicObject.id,
     sourceObjectVersion: assessment.economicObject.version,
     sourcePositionState: economics.positionState,
+    sourceFinalizedBlockNumber: economics.finalizedBlockNumber,
+    sourceFinalizedBlockHash: economics.finalizedBlockHash,
     account: economics.account,
     accountLiquidityMantissa: economics.accountLiquidityMantissa,
     accountShortfallMantissa: economics.accountShortfallMantissa,
