@@ -9,6 +9,12 @@ import {
   type NoemaAgentMandate
 } from "@kumo/noema-agent-profile";
 import { assessVenusHealthState, type VenusHealthPositionState } from "./cognition.js";
+import {
+  VENUS_LIQUIDITY_RECONSTRUCTION_RULE,
+  deriveVenusNativeLiquidationBuffer,
+  reconstructVenusAccountLiquidity,
+  type VenusLiquidationBufferState
+} from "./valuation.js";
 import type { VenusCoreAccountState } from "./types.js";
 
 export interface VenusLendingMarketRiskState {
@@ -40,6 +46,13 @@ export interface VenusLendingPositionEconomicState {
   accountEffectivePolicyObserved: true;
   differentiatedRiskPolicyMarketCount: number;
   marketRisk: VenusLendingMarketRiskState[];
+  nativeLiquidityReconstructionRule: typeof VENUS_LIQUIDITY_RECONSTRUCTION_RULE;
+  nativeLiquidityExactMatch: boolean;
+  protocolCollateralContributionMantissa: string;
+  protocolBorrowContributionMantissa: string;
+  liquidationBufferState: VenusLiquidationBufferState | null;
+  thresholdUtilizationBps: string | null;
+  liquidationBufferBpsOfBorrow: string | null;
   finalizedBlockNumber: string;
   finalizedBlockHash: string;
 }
@@ -80,10 +93,16 @@ export function buildVenusLendingPositionEconomicObject(input: {
   const assessment = assessVenusHealthState(state);
   const marketRisk = toMarketRisk(state);
   const differentiatedRiskPolicyMarketCount = marketRisk.filter((market) => market.differsFromBasePolicy).length;
+  const reconstruction = reconstructVenusAccountLiquidity(state);
+  const liquidationBuffer = reconstruction.exactNativeMatch
+    ? deriveVenusNativeLiquidationBuffer(reconstruction)
+    : null;
+
   const objectId = `noema:venus-lending-position:${state.chainId}:${state.account.toLowerCase()}`;
   const chainEvidenceId = `${objectId}:evidence:block:${state.snapshot.blockNumber}`;
   const accountEvidenceId = `${objectId}:evidence:account:${state.snapshot.blockNumber}`;
   const marketEvidenceId = `${objectId}:evidence:markets:${state.snapshot.blockNumber}`;
+  const reconstructionEvidenceId = `${objectId}:evidence:liquidity-reconstruction:${state.snapshot.blockNumber}`;
   const freshness = evaluatedAt - observedAt <= maxEvidenceAgeMs ? "FRESH" : "STALE";
 
   const evidence: NoemaAgentEvidenceRef[] = [
@@ -133,6 +152,30 @@ export function buildVenusLendingPositionEconomicObject(input: {
         accountEffectivePolicyObserved: true,
         differentiatedRiskPolicyMarketCount,
         marketRisk
+      }
+    },
+    {
+      id: reconstructionEvidenceId,
+      type: "PROOF",
+      source: `rule:${VENUS_LIQUIDITY_RECONSTRUCTION_RULE}`,
+      authority: "DERIVED",
+      observedAt,
+      fetchedAt: evaluatedAt,
+      freshness,
+      metadata: {
+        rule: reconstruction.rule,
+        exactNativeMatch: reconstruction.exactNativeMatch,
+        sumCollateralMantissa: reconstruction.sumCollateralMantissa.toString(),
+        sumBorrowPlusEffectsMantissa: reconstruction.sumBorrowPlusEffectsMantissa.toString(),
+        derivedLiquidity: reconstruction.derivedLiquidity.toString(),
+        derivedShortfall: reconstruction.derivedShortfall.toString(),
+        nativeLiquidity: reconstruction.nativeLiquidity.toString(),
+        nativeShortfall: reconstruction.nativeShortfall.toString(),
+        liquidityDelta: reconstruction.liquidityDelta.toString(),
+        shortfallDelta: reconstruction.shortfallDelta.toString(),
+        liquidationBufferState: liquidationBuffer?.state ?? null,
+        thresholdUtilizationBps: liquidationBuffer?.thresholdUtilizationBps?.toString() ?? null,
+        liquidationBufferBpsOfBorrow: liquidationBuffer?.liquidationBufferBpsOfBorrow?.toString() ?? null
       }
     }
   ];
@@ -237,8 +280,85 @@ export function buildVenusLendingPositionEconomicObject(input: {
       confidence: 1,
       observedAt,
       createdAt: evaluatedAt
+    }),
+    claim({
+      id: `${objectId}:claim:nativeLiquidityReconstructionExact`,
+      subject: objectId,
+      property: "venus.nativeLiquidityReconstructionExact",
+      value: reconstruction.exactNativeMatch,
+      state: "VERIFIED",
+      sourceRefs: [`rule:${VENUS_LIQUIDITY_RECONSTRUCTION_RULE}`],
+      evidenceRefs: [accountEvidenceId, marketEvidenceId, reconstructionEvidenceId],
+      confidence: 1,
+      observedAt,
+      createdAt: evaluatedAt
+    }),
+    claim({
+      id: `${objectId}:claim:protocolCollateralContribution`,
+      subject: objectId,
+      property: "venus.protocolCollateralContributionMantissa",
+      value: reconstruction.sumCollateralMantissa.toString(),
+      state: "VERIFIED",
+      sourceRefs: [`rule:${VENUS_LIQUIDITY_RECONSTRUCTION_RULE}`],
+      evidenceRefs: [reconstructionEvidenceId],
+      confidence: 1,
+      observedAt,
+      createdAt: evaluatedAt
+    }),
+    claim({
+      id: `${objectId}:claim:protocolBorrowContribution`,
+      subject: objectId,
+      property: "venus.protocolBorrowContributionMantissa",
+      value: reconstruction.sumBorrowPlusEffectsMantissa.toString(),
+      state: "VERIFIED",
+      sourceRefs: [`rule:${VENUS_LIQUIDITY_RECONSTRUCTION_RULE}`],
+      evidenceRefs: [reconstructionEvidenceId],
+      confidence: 1,
+      observedAt,
+      createdAt: evaluatedAt
     })
   ];
+
+  if (liquidationBuffer) {
+    claims.push(
+      claim({
+        id: `${objectId}:claim:liquidationBufferState`,
+        subject: objectId,
+        property: "venus.liquidationBufferState",
+        value: liquidationBuffer.state,
+        state: "VERIFIED",
+        sourceRefs: [`rule:${VENUS_LIQUIDITY_RECONSTRUCTION_RULE}:buffer-v1`],
+        evidenceRefs: [reconstructionEvidenceId],
+        confidence: 1,
+        observedAt,
+        createdAt: evaluatedAt
+      }),
+      claim({
+        id: `${objectId}:claim:thresholdUtilizationBps`,
+        subject: objectId,
+        property: "venus.thresholdUtilizationBps",
+        value: liquidationBuffer.thresholdUtilizationBps?.toString() ?? null,
+        state: "VERIFIED",
+        sourceRefs: [`rule:${VENUS_LIQUIDITY_RECONSTRUCTION_RULE}:buffer-v1`],
+        evidenceRefs: [reconstructionEvidenceId],
+        confidence: 1,
+        observedAt,
+        createdAt: evaluatedAt
+      }),
+      claim({
+        id: `${objectId}:claim:liquidationBufferBpsOfBorrow`,
+        subject: objectId,
+        property: "venus.liquidationBufferBpsOfBorrow",
+        value: liquidationBuffer.liquidationBufferBpsOfBorrow?.toString() ?? null,
+        state: "VERIFIED",
+        sourceRefs: [`rule:${VENUS_LIQUIDITY_RECONSTRUCTION_RULE}:buffer-v1`],
+        evidenceRefs: [reconstructionEvidenceId],
+        confidence: 1,
+        observedAt,
+        createdAt: evaluatedAt
+      })
+    );
+  }
 
   const finalized = state.snapshot.blockTag === "finalized";
   const liquidityReadSucceeded = state.liquidityError === 0n;
@@ -248,11 +368,18 @@ export function buildVenusLendingPositionEconomicObject(input: {
     && market.effectiveLiquidationThresholdMantissa >= market.effectiveCollateralFactorMantissa
     && market.effectiveLiquidationIncentiveMantissa > 0n
   );
-  const verificationStatus = finalized && liquidityReadSucceeded && sameChain && effectiveRiskComplete ? "PASS" : "FAIL";
+  const exactNativeLiquidityReconstruction = reconstruction.exactNativeMatch;
+  const verificationStatus = finalized
+    && liquidityReadSucceeded
+    && sameChain
+    && effectiveRiskComplete
+    && exactNativeLiquidityReconstruction
+    ? "PASS"
+    : "FAIL";
 
   return {
     id: objectId,
-    version: 1,
+    version: 2,
     objectType: "VENUS_CORE_LENDING_POSITION",
     classification: {
       primary: "LENDING_POSITION",
@@ -274,6 +401,13 @@ export function buildVenusLendingPositionEconomicObject(input: {
       accountEffectivePolicyObserved: true,
       differentiatedRiskPolicyMarketCount,
       marketRisk,
+      nativeLiquidityReconstructionRule: reconstruction.rule,
+      nativeLiquidityExactMatch: reconstruction.exactNativeMatch,
+      protocolCollateralContributionMantissa: reconstruction.sumCollateralMantissa.toString(),
+      protocolBorrowContributionMantissa: reconstruction.sumBorrowPlusEffectsMantissa.toString(),
+      liquidationBufferState: liquidationBuffer?.state ?? null,
+      thresholdUtilizationBps: liquidationBuffer?.thresholdUtilizationBps?.toString() ?? null,
+      liquidationBufferBpsOfBorrow: liquidationBuffer?.liquidationBufferBpsOfBorrow?.toString() ?? null,
       finalizedBlockNumber: state.snapshot.blockNumber,
       finalizedBlockHash: state.snapshot.blockHash
     },
@@ -281,7 +415,7 @@ export function buildVenusLendingPositionEconomicObject(input: {
     evidence,
     verification: {
       status: verificationStatus,
-      verifierVersion: "kumo-venus-noema-verifier-v2",
+      verifierVersion: "kumo-venus-noema-verifier-v3",
       checks: [
         {
           id: `${objectId}:check:finalized`,
@@ -320,10 +454,26 @@ export function buildVenusLendingPositionEconomicObject(input: {
           evidenceRefs: [marketEvidenceId],
           ruleVersion: "1",
           timestamp: evaluatedAt
+        },
+        {
+          id: `${objectId}:check:native-liquidity-reconstruction`,
+          type: "VENUS_NATIVE_LIQUIDITY_RECONSTRUCTION_EXACT",
+          subject: objectId,
+          result: exactNativeLiquidityReconstruction ? "PASS" : "FAIL",
+          evidenceRefs: [accountEvidenceId, marketEvidenceId, reconstructionEvidenceId],
+          ruleVersion: VENUS_LIQUIDITY_RECONSTRUCTION_RULE,
+          timestamp: evaluatedAt,
+          reason: exactNativeLiquidityReconstruction
+            ? undefined
+            : `LIQUIDITY_DELTA_${reconstruction.liquidityDelta.toString()}_SHORTFALL_DELTA_${reconstruction.shortfallDelta.toString()}`
         }
       ]
     },
-    status: verificationStatus === "PASS" && freshness === "FRESH" ? "RESOLVED" : freshness === "STALE" ? "STALE" : "INSUFFICIENT_EVIDENCE",
+    status: verificationStatus === "PASS" && freshness === "FRESH"
+      ? "RESOLVED"
+      : freshness === "STALE"
+        ? "STALE"
+        : "INSUFFICIENT_EVIDENCE",
     createdAt: evaluatedAt,
     updatedAt: evaluatedAt
   };
@@ -335,9 +485,9 @@ export function buildVenusHealthMandate(input: {
 }): NoemaAgentMandate {
   return {
     id: `noema-mandate:venus-health:${input.principal}`,
-    version: 1,
+    version: 2,
     principal: input.principal,
-    objective: "Assess the current Venus Core lending position from finalized onchain state and account-effective risk policy before any health or rescue decision.",
+    objective: "Assess the current Venus Core lending position from finalized onchain state, account-effective risk policy, and an exact deterministic reconstruction of Venus-native liquidity before any health or rescue decision.",
     economicObjectType: "VENUS_CORE_LENDING_POSITION",
     requiredClaims: [
       { property: "position.state", acceptedStates: ["VERIFIED"] },
@@ -345,7 +495,9 @@ export function buildVenusHealthMandate(input: {
       { property: "venus.accountShortfallMantissa", acceptedStates: ["VERIFIED"] },
       { property: "position.liveCollateralMarketCount", acceptedStates: ["VERIFIED"] },
       { property: "position.debtMarketCount", acceptedStates: ["VERIFIED"] },
-      { property: "risk.accountEffectivePolicyObserved", acceptedStates: ["VERIFIED"] }
+      { property: "risk.accountEffectivePolicyObserved", acceptedStates: ["VERIFIED"] },
+      { property: "venus.nativeLiquidityReconstructionExact", acceptedStates: ["VERIFIED"] },
+      { property: "venus.liquidationBufferState", acceptedStates: ["VERIFIED"] }
     ],
     maxEvidenceAgeMs: input.maxEvidenceAgeMs ?? 60_000,
     constraints: {
@@ -353,6 +505,7 @@ export function buildVenusHealthMandate(input: {
       protocol: "venus-core",
       finalizedStateRequired: true,
       accountEffectiveRiskPolicyRequired: true,
+      exactNativeLiquidityReconstructionRequired: true,
       genericHealthFactorAllowed: false
     }
   };
