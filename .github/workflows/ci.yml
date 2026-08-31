@@ -38,3 +38,6 @@ jobs:
 
       - name: Verify Venus Noema risk policy semantics
         run: node scripts/venus-health-noema-risk-fixture.mjs
+
+      - name: Verify Venus native liquidity reconstruction
+        run: node scripts/venus-liquidity-reconstruction-fixture.mjs
