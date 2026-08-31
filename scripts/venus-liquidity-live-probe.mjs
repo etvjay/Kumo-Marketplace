@@ -2,6 +2,7 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import {
   VenusCorePoolReader,
+  deriveVenusNativeLiquidationBuffer,
   reconstructVenusAccountLiquidity
 } from "../packages/reference-agents/dist/health/index.js";
 
@@ -15,19 +16,26 @@ const rpcProviderId = new URL(rpcUrl).hostname;
 const reader = new VenusCorePoolReader({ rpcUrl, rpcProviderId, purpose: "evidence" });
 const state = await reader.readAccount(account);
 const reconstruction = reconstructVenusAccountLiquidity(state);
+const liquidationBuffer = deriveVenusNativeLiquidationBuffer(reconstruction);
 const debtMarkets = state.activeMarkets.filter((market) => market.borrowBalance > 0n).length;
+const currentDebtObserved = debtMarkets > 0;
+
+const debtSemanticsConsistent = currentDebtObserved
+  ? liquidationBuffer.state !== "NO_DEBT"
+  : liquidationBuffer.state === "NO_DEBT" && liquidationBuffer.liquidationBufferBpsOfBorrow === null;
 
 const passed = state.snapshot.blockTag === "finalized"
   && reconstruction.exactNativeMatch
   && reconstruction.liquidityDelta === 0n
-  && reconstruction.shortfallDelta === 0n;
+  && reconstruction.shortfallDelta === 0n
+  && debtSemanticsConsistent;
 
 const output = {
-  schemaVersion: "kumo-venus-liquidity-live-probe-v1",
+  schemaVersion: "kumo-venus-liquidity-live-probe-v2",
   generatedAt,
   classification: "LIVE_READ_ONLY_PROTOCOL_ARITHMETIC_PROBE",
   ownershipClaim: "NONE_PUBLIC_CHAIN_ACCOUNT_ONLY",
-  borrowerRiskClaim: debtMarkets > 0 ? "CURRENT_DEBT_OBSERVED" : "NONE_COLLATERAL_ONLY_OR_NO_DEBT",
+  borrowerRiskClaim: currentDebtObserved ? "CURRENT_DEBT_OBSERVED" : "NONE_COLLATERAL_ONLY_OR_NO_DEBT",
   account,
   rpcProviderId,
   finalizedBlock: {
@@ -41,11 +49,15 @@ const output = {
     solvencyStatus: state.nativeSolvencyStatus
   },
   reconstruction,
+  liquidationBuffer,
   invariants: {
     finalized: state.snapshot.blockTag === "finalized",
     exactNativeMatch: reconstruction.exactNativeMatch,
     zeroLiquidityDelta: reconstruction.liquidityDelta === 0n,
     zeroShortfallDelta: reconstruction.shortfallDelta === 0n,
+    currentDebtObserved,
+    debtSemanticsConsistent,
+    noDebtDoesNotInventBorrowBuffer: currentDebtObserved || liquidationBuffer.liquidationBufferBpsOfBorrow === null,
     passed
   }
 };
