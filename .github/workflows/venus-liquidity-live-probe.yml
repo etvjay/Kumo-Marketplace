@@ -1,0 +1,55 @@
+name: Venus Liquidity Live Probe
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "packages/reference-agents/src/health/**"
+      - "scripts/venus-liquidity-live-probe.mjs"
+      - ".github/workflows/venus-liquidity-live-probe.yml"
+  workflow_dispatch:
+    inputs:
+      account:
+        description: "Public Venus Core account to reconstruct"
+        required: false
+        default: "0x9FBd07c1db2a93b1BB079C6c958DF374EF93fFd9"
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Enable Corepack and pnpm
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.8.1 --activate
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build workspace
+        run: pnpm build
+
+      - name: Reconstruct finalized Venus account liquidity
+        env:
+          BSC_RPC_URL: https://bsc-dataseed.bnbchain.org
+          VENUS_LIQUIDITY_ACCOUNT: ${{ inputs.account || '0x9FBd07c1db2a93b1BB079C6c958DF374EF93fFd9' }}
+          KUMO_EVIDENCE_PATH: evidence/live/venus-liquidity-live-probe.json
+        run: node scripts/venus-liquidity-live-probe.mjs
+
+      - name: Upload Venus liquidity equivalence evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venus-liquidity-live-probe-${{ github.sha }}
+          path: evidence/live/venus-liquidity-live-probe.json
+          if-no-files-found: error
+          retention-days: 30
